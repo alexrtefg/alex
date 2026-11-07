@@ -194,3 +194,12 @@ def test_nutrition_db(tmp_path):
     assert "Вода: 500 / 2000 мл" in rep and "не хватает" in rep
     days = db.nutrition_days(1, date.today(), date.today())
     assert len(days) == 1 and days[0]["water"] == 500
+
+
+def test_rest_and_duration():
+    from exercises import rest_for
+    from timer import mmss, parse_duration
+    assert rest_for("squat") == 180 and rest_for("deadlift") == 180
+    assert rest_for("bench") == 120 and rest_for("curl_db") == 90 and rest_for(None) == 90
+    assert [parse_duration(x) for x in ["90", "2:30", "3", "1,5", "2 мин", "abc"]] == [90, 150, 180, 90, 120, None]
+    assert mmss(125) == "2:05"

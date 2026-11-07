@@ -122,3 +122,17 @@ DUMBBELLS = [12, 16, 18]  # гантели с фиксированным вес�
 KETTLEBELLS = [16, 24, 32]
 EQUIPMENT_OTHER = ["скамья наклонная", "скамья горизонтальная", "стойка для жима и приседа",
                    "турник", "брусья", "шведская стенка", "EZ-гриф", "пояс штангиста", "цепь с крючками"]
+
+# Отдых между подходами, секунды. Можно поменять под себя.
+REST_HEAVY = 180   # тяжёлая база: присед, становая
+REST_BASE = 120    # базовые упражнения
+REST_LIGHT = 90    # лёгкие и изолирующие упражнения, пресс
+REST_SECONDS = {
+    **{k: REST_HEAVY for k in ("squat", "deadlift")},
+    **{k: REST_BASE for k in ("bench", "incline_bench", "bent_row", "stiff_deadlift", "romanian", "ohp_seated",
+                              "pullups", "dips", "close_grip", "lunges", "bulgarian", "db_incline_press")},
+}
+
+
+def rest_for(key: str | None) -> int:
+    return REST_SECONDS.get(key, REST_LIGHT)

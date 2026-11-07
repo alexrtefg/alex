@@ -14,12 +14,13 @@ from dotenv import load_dotenv
 
 import reports
 from db import DB
-from exercises import ABS_TRISET, BY_KEY, EXERCISES, GROUPS, TEMPLATES
+from exercises import ABS_TRISET, BY_KEY, EXERCISES, GROUPS, REST_LIGHT, TEMPLATES, rest_for
 from export import export_xlsx
 from matcher import Matcher
 from parser import ParseError, SetRow, parse_sets, parse_triset, split_name
 from plates import fmt_kg, plates_text
 import nutrition as nut
+from timer import DEFAULT_SIGNAL, Timers, mmss, parse_duration
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -36,6 +37,16 @@ if OWNER_ID:  # бот отвечает только владельцу
 # Временная память: что ждёт ответа на кнопку.
 pending_pick: dict[int, dict] = {}   # выбор упражнения из вариантов
 pending_text: dict[int, str] = {}    # запись, присланная до начала тренировки
+pending_voice: dict[int, tuple] = {}  # голосовое, которое можно сделать сигналом таймера
+
+
+def get_signal(user_id: int):
+    text = db.get_setting(user_id, "signal_text", DEFAULT_SIGNAL)
+    kind, file_id = db.get_setting(user_id, "signal_kind"), db.get_setting(user_id, "signal_file")
+    return text, ((kind, file_id) if file_id else None)
+
+
+timers = Timers(get_signal)
 
 BTN_START = "▶️ Начать тренировку"
 BTN_FINISH = "⏹ Завершить"
@@ -45,6 +56,7 @@ BTN_UNDO = "↩️ Отменить последнее"
 BTN_HELP = "❓ Помощь"
 BTN_FOOD = "🍽 Питание"
 BTN_WATER = "💧 +250 мл"
+BTN_REST = "⏱ Отдых"
 
 REMIND_HOURS = [10, 12, 14, 16, 18, 20]   # когда напоминать про воду, если пьёшь меньше плана
 
@@ -52,7 +64,8 @@ MENU = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_FINISH)],
               [KeyboardButton(text=BTN_REPORT), KeyboardButton(text=BTN_HISTORY)],
               [KeyboardButton(text=BTN_FOOD), KeyboardButton(text=BTN_WATER)],
-              [KeyboardButton(text=BTN_UNDO), KeyboardButton(text=BTN_HELP)]],
+              [KeyboardButton(text=BTN_REST), KeyboardButton(text=BTN_UNDO)],
+              [KeyboardButton(text=BTN_HELP)]],
     resize_keyboard=True,
     input_field_placeholder="жим лежа 4х10х60",
 )
@@ -67,6 +80,11 @@ HELP = (
     "• пресс 2 30 110 100 — свои круги и повторы\n\n"
     "Опечатки не страшны: «жиму леж» = Жим лёжа.\n"
     "Если бот не уверен, он покажет варианты кнопками.\n\n"
+    "⏱ ОТДЫХ: после записи подхода таймер запускается сам — присед и становая 3:00, базовые 2:00, "
+    "лёгкие 1:30. Кнопка «⏱ Отдых» или «отдых 2:30» — запустить вручную.\n"
+    "• /autorest_off — не запускать сам, /autorest_on — снова запускать\n"
+    "• /signal Твой текст — своя фраза в конце отдыха\n"
+    "• пришли боту голосовое — оно станет сигналом окончания отдыха (/signal_reset — убрать)\n\n"
     "🍽 ПИТАНИЕ — пиши как говоришь, через запятую:\n"
     "• тарелка супа, 2 средних яблока, банан, стакан молока, гречка 150-200 г\n"
     "• творог 200, 3 яйца, курица 150, хлеб 2 куска\n"
@@ -92,10 +110,29 @@ def template_keys(wtype: str | None) -> list:
     return TEMPLATES[wtype]["exercises"] if wtype else []
 
 
-def undo_kb(entry_ids: list[int]):
+def undo_kb(entry_ids: list[int], rest_seconds: int | None = None):
     kb = InlineKeyboardBuilder()
     kb.button(text="↩️ Отменить", callback_data="undo:" + ",".join(map(str, entry_ids)))
+    if rest_seconds:
+        kb.button(text=f"⏱ Отдых {mmss(rest_seconds)}", callback_data=f"rest:{rest_seconds}")
     return kb.as_markup()
+
+
+def autorest(user_id: int) -> bool:
+    return db.get_setting(user_id, "autorest", "1") == "1"
+
+
+async def start_rest(message: Message, user_id: int, seconds: int, label: str):
+    await timers.start(message.bot, user_id, message.chat.id, seconds,
+                       f"После: {label} · отдых {mmss(seconds)}")
+
+
+async def after_record(message: Message, user_id: int, text: str, entry_ids: list[int], seconds: int, label: str):
+    """Ответ на запись + таймер отдыха (сам или по кнопке)."""
+    auto = autorest(user_id)
+    await message.answer(text, reply_markup=undo_kb(entry_ids, None if auto else seconds))
+    if auto:
+        await start_rest(message, user_id, seconds, label)
 
 
 def choose_type_kb(suggested: str):
@@ -247,8 +284,8 @@ async def save_triset(message: Message, workout_id: int, rounds: int, reps: list
     for (key, _), r in zip(ABS_TRISET["items"], reps):
         ids.append(db.add_entry(workout_id, key, [SetRow(r) for _ in range(rounds)], "трисет"))
         lines.append(f"• {reports.ex_name(key)} — {rounds}×{r}")
-    await message.answer(f"✅ {ABS_TRISET['title']}, кругов: {rounds}\n" + "\n".join(lines),
-                         reply_markup=undo_kb(ids))
+    await after_record(message, message_user(message), f"✅ {ABS_TRISET['title']}, кругов: {rounds}\n" + "\n".join(lines),
+                       ids, REST_LIGHT, ABS_TRISET["title"])
 
 
 # ---------- отчёты ----------
@@ -349,7 +386,7 @@ async def save_entry(message: Message, user_id: int, workout_id: int, key: str, 
     last = reports.last_result_text(db, user_id, key, workout_id)
     if last:
         text += f"\n↗️ {last}"
-    await message.answer(text, reply_markup=undo_kb([entry_id]))
+    await after_record(message, user_id, text, [entry_id], rest_for(key), ex.name)
 
 
 # ---------- свободный текст: записи, блины, прогресс ----------
@@ -360,6 +397,18 @@ async def on_text(message: Message):
     low = text.lower().replace("ё", "е")
     if low.startswith("/"):
         await message.answer("Не знаю такую команду.\n\n" + HELP)
+        return
+
+    m = re.fullmatch(r"(отдых|таймер)\s*(.*)", low)
+    if m:
+        if not m.group(2):
+            await rest_button(message)
+            return
+        seconds = parse_duration(m.group(2))
+        if not seconds or not 10 <= seconds <= 900:
+            await message.answer("Напиши время: отдых 90 · отдых 2:30 · отдых 3 (минуты)")
+            return
+        await start_rest(message, user_id, seconds, "подход")
         return
 
     m = re.fullmatch(r"(блины|гантел[ьяиюей]*)\s*(ez|из|z|з|изогнутый|изогнутым)?\s*(\d+(?:[.,]\d+)?)?\s*(кг)?", low)
@@ -662,6 +711,110 @@ async def water_reminders(bot: Bot):
                     await bot.send_message(p["user_id"], text, reply_markup=markup)
             except Exception:
                 logging.exception("Не удалось отправить напоминание о воде")
+
+
+# ---------- таймер отдыха ----------
+
+def message_user(message: Message) -> int:
+    """ID пользователя: у сообщений бота (из кнопок) from_user — сам бот, тогда берём чат."""
+    return message.chat.id if message.from_user is None or message.from_user.is_bot else message.from_user.id
+
+
+@router.message(Command("rest"))
+@router.message(F.text == BTN_REST)
+async def rest_button(message: Message):
+    user_id = message.from_user.id
+    active = db.active_workout(user_id)
+    last = db.last_entry(active["id"]) if active else None
+    key = last["exercise_key"] if last else None
+    await start_rest(message, user_id, rest_for(key) if key else 120, reports.ex_name(key) if key else "подход")
+
+
+@router.callback_query(F.data.startswith("rest:"))
+async def on_rest(cb: CallbackQuery):
+    seconds = int(cb.data.split(":")[1])
+    await cb.answer()
+    await start_rest(cb.message, cb.from_user.id, seconds, "подход")
+
+
+@router.callback_query(F.data.startswith("rt:"))
+async def on_timer_control(cb: CallbackQuery):
+    action = cb.data.split(":")[1]
+    if action == "stop":
+        t = timers.cancel(cb.from_user.id)
+        await cb.answer("Таймер остановлен" if t else "Таймер уже закончился")
+        try:
+            await cb.message.edit_text("⏹ Отдых остановлен")
+        except Exception:
+            pass
+        return
+    left = timers.adjust(cb.from_user.id, int(action))
+    if left is None:
+        await cb.answer("Таймер уже закончился")
+        return
+    await cb.answer(f"Осталось {mmss(left)}")
+    try:
+        t = timers.active[cb.from_user.id]
+        await cb.message.edit_text(timers._text(t.label, left), reply_markup=cb.message.reply_markup)
+    except Exception:
+        pass
+
+
+@router.message(Command("autorest_on"))
+async def autorest_on(message: Message):
+    db.set_setting(message.from_user.id, "autorest", "1")
+    await message.answer("⏱ Таймер отдыха будет запускаться сам после каждой записи.")
+
+
+@router.message(Command("autorest_off"))
+async def autorest_off(message: Message):
+    db.set_setting(message.from_user.id, "autorest", "0")
+    await message.answer("⏱ Таймер сам не запускается. Под записью будет кнопка «⏱ Отдых».")
+
+
+@router.message(Command("signal"))
+async def set_signal(message: Message):
+    text = (message.text or "").split(maxsplit=1)
+    if len(text) < 2:
+        cur, media = get_signal(message.from_user.id)
+        await message.answer(f"Сейчас в конце отдыха: «{cur}»{' + голосовое' if media else ''}\n"
+                             "Поменять: /signal Пошёл заниматься, герой!\n"
+                             "Голосом: просто пришли боту голосовое сообщение.")
+        return
+    db.set_setting(message.from_user.id, "signal_text", text[1].strip()[:200])
+    await message.answer(f"🔔 Готово, в конце отдыха будет: «{text[1].strip()[:200]}»")
+
+
+@router.message(Command("signal_reset"))
+async def reset_signal(message: Message):
+    for k in ("signal_text", "signal_kind", "signal_file"):
+        db.set_setting(message.from_user.id, k, None)
+    await message.answer(f"🔔 Сигнал сброшен: «{DEFAULT_SIGNAL}», без голосового.")
+
+
+@router.message(F.voice | F.audio)
+async def on_voice(message: Message):
+    if message.voice:
+        pending_voice[message.from_user.id] = ("voice", message.voice.file_id)
+    else:
+        pending_voice[message.from_user.id] = ("audio", message.audio.file_id)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, это сигнал конца отдыха", callback_data="sig:yes")
+    kb.button(text="Нет", callback_data="sig:no")
+    kb.adjust(1)
+    await message.answer("Сделать это голосовое сигналом окончания отдыха?", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("sig:"))
+async def on_signal_choice(cb: CallbackQuery):
+    media = pending_voice.pop(cb.from_user.id, None)
+    await cb.answer()
+    if cb.data == "sig:yes" and media:
+        db.set_setting(cb.from_user.id, "signal_kind", media[0])
+        db.set_setting(cb.from_user.id, "signal_file", media[1])
+        await cb.message.edit_text("🔔 Готово! Это голосовое придёт в конце каждого отдыха. Убрать: /signal_reset")
+    else:
+        await cb.message.edit_text("Хорошо, не меняю сигнал.")
 
 
 # Свободный текст обрабатывается последним, после всех кнопок и команд.

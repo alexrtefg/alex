@@ -71,6 +71,12 @@ CREATE TABLE IF NOT EXISTS water_log (
 );
 CREATE INDEX IF NOT EXISTS idx_food_user_day ON food_log(user_id, day);
 CREATE INDEX IF NOT EXISTS idx_water_user_day ON water_log(user_id, day);
+CREATE TABLE IF NOT EXISTS settings (
+    user_id INTEGER NOT NULL,
+    key     TEXT NOT NULL,
+    value   TEXT,
+    PRIMARY KEY (user_id, key)
+);
 CREATE INDEX IF NOT EXISTS idx_workouts_user_day ON workouts(user_id, day);
 CREATE INDEX IF NOT EXISTS idx_entries_workout ON entries(workout_id);
 CREATE INDEX IF NOT EXISTS idx_sets_entry ON sets(entry_id);
@@ -271,3 +277,12 @@ class DB:
             "           FROM food_log WHERE user_id=:u GROUP BY day) f ON f.day=d.day "
             "LEFT JOIN (SELECT day, SUM(ml) ml FROM water_log WHERE user_id=:u GROUP BY day) w ON w.day=d.day "
             "ORDER BY d.day", dict(u=user_id, s=start.isoformat(), e=end.isoformat())).fetchall()
+
+    # --- настройки ---
+    def get_setting(self, user_id: int, key: str, default: str | None = None) -> str | None:
+        row = self.conn.execute("SELECT value FROM settings WHERE user_id=? AND key=?", (user_id, key)).fetchone()
+        return row["value"] if row and row["value"] is not None else default
+
+    def set_setting(self, user_id: int, key: str, value: str | None):
+        self.conn.execute("INSERT OR REPLACE INTO settings(user_id, key, value) VALUES (?,?,?)", (user_id, key, value))
+        self.conn.commit()
