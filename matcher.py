@@ -38,12 +38,15 @@ class MatchResult:
 
 
 class Matcher:
-    def __init__(self, learned_aliases: dict | None = None):
+    """Поиск по справочнику. catalog: {код: [название, синоним, ...]}; по умолчанию — упражнения."""
+
+    def __init__(self, learned_aliases: dict | None = None, catalog: dict | None = None):
+        if catalog is None:
+            catalog = {ex.key: [ex.name, *ex.aliases] for ex in EXERCISES}
         self.alias_to_key: dict[str, str] = {}
-        for ex in EXERCISES:
-            self.alias_to_key[normalize(ex.name)] = ex.key
-            for a in ex.aliases:
-                self.alias_to_key[normalize(a)] = ex.key
+        for key, names in catalog.items():
+            for n in names:
+                self.alias_to_key[normalize(n)] = key
         for alias, key in (learned_aliases or {}).items():
             self.learn(alias, key)
 

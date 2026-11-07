@@ -10,7 +10,8 @@ from db import DB  # noqa: E402
 from exercises import ABS_TRISET, BY_KEY, TEMPLATES  # noqa: E402
 from matcher import Matcher  # noqa: E402
 from parser import ParseError, parse_sets, parse_triset, split_name  # noqa: E402
-from plates import plates_per_side  # noqa: E402
+from plates import max_weight, plates_per_side  # noqa: E402
+import nutrition as nut  # noqa: E402
 import reports  # noqa: E402
 
 m = Matcher()
@@ -93,17 +94,22 @@ def test_triset():
 
 
 def test_plates():
-    combo, real = plates_per_side(60)            # (60-10)/2 = 25 на сторону
-    assert real == 60 and sum(combo) == 25 and len(combo) == 2
-    combo, real = plates_per_side(36)            # 13 на сторону — жёлтые блины
+    combo, real = plates_per_side(60)            # гриф 7 кг -> 26,5 на сторону
+    assert real == 60 and sum(combo) == 26.5
+    combo, real = plates_per_side(87.5)          # 40,25 на сторону
+    assert real == 87.5 and combo == [15, 13, 10, 1.25, 0.5, 0.5]
+    combo, real = plates_per_side(33)            # 13 на сторону — жёлтые блины
     assert combo == [13]
-    combo, real = plates_per_side(61)            # 25.5 на сторону
-    assert real == 61
-    combo, real = plates_per_side(71.3)          # не собрать ровно -> ближайший меньший
-    assert real <= 71.3 and real > 70
-    combo, real = plates_per_side(1000)          # больше, чем есть блинов
-    assert real == 149.5
+    assert plates_per_side(1000)[1] == max_weight(7) == 135   # больше, чем есть блинов
     assert plates_per_side(30, bar=5)[1] == 30   # EZ-гриф 5 кг
+
+
+def test_dumbbell_pair():
+    combo, real = plates_per_side(11, bar=1, sides=4)
+    assert combo == [5] and real == 11
+    combo, real = plates_per_side(10, bar=1, sides=4)   # ровно 10 не собрать
+    assert real == 9.5
+    assert max_weight(1, sides=4) == 24.5
 
 
 def test_db_and_reports(tmp_path):
@@ -136,3 +142,55 @@ def test_all_template_keys_exist():
 def test_generic_words_not_learned():
     assert m.is_generic("бицепс") and m.is_generic("тяга")
     assert not m.is_generic("мой жимчик")
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("суп тарелка, 2 яблока средних, 1 банан, стакан молока, каши гречневой тарелку 150-200 грамм",
+     [("soup", 300), ("apple", 300), ("banana", 120), ("milk", 250), ("buckwheat", 175)]),
+    ("съел тарелку супа и 2 яблока", [("soup", 300), ("apple", 300)]),
+    ("творог 200г", [("cottage5", 200)]),
+    ("полтарелки борща", [("borsch", 150)]),
+    ("3 яйца", [("egg", 165)]),
+    ("гречка 200", [("buckwheat", 200)]),
+    ("большое яблоко", [("apple", 195)]),
+    ("хлеб 2 куска", [("bread_white", 60)]),
+    ("вода 500", [("water", 500)]),
+    ("выпил воды 2 стакана", [("water", 500)]),
+    ("вода 1,5 л", [("water", 1500)]),
+])
+def test_food_parse(text, expected):
+    items = nut.parse_food_text(text)
+    assert [(i.key, i.grams) for i in items] == expected
+
+
+def test_food_vs_exercise():
+    assert nut.looks_like_food("2 яблока, банан")
+    assert nut.looks_like_food("вода 500")
+    assert not nut.looks_like_food("жим лежа 4х10х60")
+    assert not nut.looks_like_food("пресс")
+    assert not nut.looks_like_food("подтягивания 3х8 +16")
+
+
+def test_targets():
+    p = nut.parse_profile("профиль 85 180 м 50")
+    assert p == dict(weight=85, height=180, sex="m", age=50, goal="maintain")
+    t = nut.targets(p)
+    # Миффлин: 10*85 + 6.25*180 - 5*50 + 5 = 1730; * 1.375 = 2378.75
+    assert round(t["bmr"]) == 1730 and round(t["kcal"]) == 2379
+    assert t["protein"] == 136 and t["fat"] == 85 and t["water"] == 2000
+    assert nut.parse_profile("профиль 70 165 ж 45 похудение")["goal"] == "loss"
+    with pytest.raises(ValueError):
+        nut.parse_profile("профиль 85")
+
+
+def test_nutrition_db(tmp_path):
+    db = DB(str(tmp_path / "n.db"))
+    db.save_profile(1, 85, 180, "m", 50, "maintain")
+    for it in nut.parse_food_text("тарелка супа, 2 яблока, творог 200"):
+        db.add_food(1, it.key, it.grams, nut.nutrients(it.key, it.grams))
+    db.add_water(1, 500)
+    rep = nut.day_report(db.food_day(1, date.today()), db.water_day(1, date.today()), db.get_profile(1), "Сегодня")
+    assert "Творог 5% — 200 г · 242 ккал · Б 34" in rep
+    assert "Вода: 500 / 2000 мл" in rep and "не хватает" in rep
+    days = db.nutrition_days(1, date.today(), date.today())
+    assert len(days) == 1 and days[0]["water"] == 500

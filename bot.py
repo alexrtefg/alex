@@ -2,7 +2,8 @@
 import asyncio
 import logging
 import os
-from datetime import date
+import re
+from datetime import date, datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
@@ -18,6 +19,7 @@ from export import export_xlsx
 from matcher import Matcher
 from parser import ParseError, SetRow, parse_sets, parse_triset, split_name
 from plates import fmt_kg, plates_text
+import nutrition as nut
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -41,17 +43,22 @@ BTN_REPORT = "📊 Отчёт"
 BTN_HISTORY = "📅 История"
 BTN_UNDO = "↩️ Отменить последнее"
 BTN_HELP = "❓ Помощь"
+BTN_FOOD = "🍽 Питание"
+BTN_WATER = "💧 +250 мл"
+
+REMIND_HOURS = [10, 12, 14, 16, 18, 20]   # когда напоминать про воду, если пьёшь меньше плана
 
 MENU = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_FINISH)],
               [KeyboardButton(text=BTN_REPORT), KeyboardButton(text=BTN_HISTORY)],
+              [KeyboardButton(text=BTN_FOOD), KeyboardButton(text=BTN_WATER)],
               [KeyboardButton(text=BTN_UNDO), KeyboardButton(text=BTN_HELP)]],
     resize_keyboard=True,
     input_field_placeholder="жим лежа 4х10х60",
 )
 
 HELP = (
-    "Как записывать (одной строкой):\n"
+    "🏋️ ТРЕНИРОВКА — одной строкой:\n"
     "• жим лежа 4х10х60 — 4 подхода по 10 повторов, 60 кг\n"
     "• жим лежа 60 10 10 8 8 — вес 60, повторы в каждом подходе\n"
     "• подтягивания 3х10 — свой вес\n"
@@ -60,8 +67,16 @@ HELP = (
     "• пресс 2 30 110 100 — свои круги и повторы\n\n"
     "Опечатки не страшны: «жиму леж» = Жим лёжа.\n"
     "Если бот не уверен, он покажет варианты кнопками.\n\n"
+    "🍽 ПИТАНИЕ — пиши как говоришь, через запятую:\n"
+    "• тарелка супа, 2 средних яблока, банан, стакан молока, гречка 150-200 г\n"
+    "• творог 200, 3 яйца, курица 150, хлеб 2 куска\n"
+    "• профиль 85 180 м 50 — вес, рост, пол, возраст (можно добавить: набор / похудение)\n"
+    "• вес 84,5 — записать вес тела\n\n"
+    "💧 ВОДА: кнопка «+250 мл» или «вода 500», «вода 2 стакана», «вода 1,5 л».\n"
+    "Напоминания: /water_off — выключить, /water_on — включить.\n\n"
     "Ещё:\n"
     "• блины 90 — что повесить на гриф (блины ez 40 — для EZ-грифа)\n"
+    "• гантели 10 — как собрать пару наборных гантелей по 10 кг\n"
     "• прогресс жим — история и рекорды упражнения\n"
     "• /exercises — список упражнений\n"
     "• /export — весь дневник в Excel\n"
@@ -97,7 +112,8 @@ def choose_type_kb(suggested: str):
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
-        "Привет! Я твой дневник тренировок 💪\n\n" + HELP +
+        "Привет! Я твой дневник тренировок и питания 💪\n\n" + HELP +
+        "\n\nНачни с профиля, чтобы я посчитал твою норму: профиль 85 180 м 50" +
         f"\n\nТвой Telegram ID: {message.from_user.id}",
         reply_markup=MENU)
 
@@ -338,7 +354,6 @@ async def save_entry(message: Message, user_id: int, workout_id: int, key: str, 
 
 # ---------- свободный текст: записи, блины, прогресс ----------
 
-@router.message(F.text)
 async def on_text(message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
@@ -347,16 +362,40 @@ async def on_text(message: Message):
         await message.answer("Не знаю такую команду.\n\n" + HELP)
         return
 
-    if low.startswith("блины"):
-        rest = low.removeprefix("блины").strip().replace(",", ".")
-        bar = "straight"
-        tokens = rest.split()
-        if tokens and tokens[0] in ("ez", "из", "z", "з", "изогнутый", "изогнутым"):
-            bar, rest = "ez", " ".join(tokens[1:])
+    m = re.fullmatch(r"(блины|гантел[ьяиюей]*)\s*(ez|из|z|з|изогнутый|изогнутым)?\s*(\d+(?:[.,]\d+)?)?\s*(кг)?", low)
+    if m:
+        bar = "dumbbell" if m.group(1).startswith("гантел") else ("ez" if m.group(2) else "straight")
+        if not m.group(3):
+            await message.answer("Напиши вес, например: блины 90 · блины ez 40 · гантели 10")
+        else:
+            await message.answer(plates_text(float(m.group(3).replace(",", ".")), bar))
+        return
+
+    if low.startswith("профиль"):
         try:
-            await message.answer(plates_text(float(rest), bar))
-        except ValueError:
-            await message.answer("Напиши вес, например: блины 90 или блины ez 40")
+            p = nut.parse_profile(text)
+        except ValueError as e:
+            await message.answer(str(e))
+            return
+        db.save_profile(user_id, **p)
+        await message.answer(nut.profile_text(db.get_profile(user_id)) +
+                             "\n\n💧 Напоминания о воде включены (/water_off — выключить).")
+        return
+
+    m = re.fullmatch(r"вес\s*(\d+(?:[.,]\d+)?)\s*(кг)?", low)
+    if m:
+        w = float(m.group(1).replace(",", "."))
+        if not db.get_profile(user_id):
+            await message.answer("Сначала заполни профиль: профиль 85 180 м 50")
+            return
+        prev = db.weight_history(user_id)
+        db.log_weight(user_id, w)
+        text_w = f"⚖️ Вес {fmt_kg(w)} кг записан."
+        if prev:
+            text_w += f" Прошлый раз ({reports.ddmmyyyy(prev[-1]['day'])}): {fmt_kg(prev[-1]['weight'])} кг."
+        await message.answer(text_w + "\nНорма пересчитана: " +
+                             f"{nut.targets(db.get_profile(user_id))['kcal']:.0f} ккал, "
+                             f"белок {nut.targets(db.get_profile(user_id))['protein']:.0f} г.")
         return
 
     for prefix in ("прогресс", "отчет", "рекорд"):
@@ -369,6 +408,19 @@ async def on_text(message: Message):
                 await message.answer("Уточни упражнение: " + ", ".join(reports.ex_name(k) for k, _ in res.options))
             else:
                 await message.answer("Не нашёл такое упражнение. Пример: прогресс жим лежа")
+            return
+
+    is_triset = parse_triset_safe(text)
+    name, _ = split_name(text)
+    ex_res = matcher.match(name) if name else None
+    if not is_triset and not (ex_res and ex_res.status == "ok"):
+        if nut.looks_like_food(text):
+            await handle_food(message, user_id, text)
+            return
+        if not ex_res or ex_res.status == "none" or not re.search(r"\d", text):
+            await message.answer("🤔 Не понял. Это не похоже ни на упражнение, ни на еду.\n"
+                                 "Примеры: жим лежа 4х10х60 · 2 яблока, тарелка супа · вода 500\n"
+                                 "Все примеры: ❓ Помощь")
             return
 
     active = db.active_workout(user_id)
@@ -411,6 +463,211 @@ async def handle_entry(message: Message, user_id: int, text: str, workout_id: in
                              f"Можно добавить новое в файл exercises.py.")
 
 
+def parse_triset_safe(text: str) -> bool:
+    try:
+        return parse_triset(text, ABS_TRISET["keywords"], ABS_TRISET["rounds"],
+                            [r for _, r in ABS_TRISET["items"]]) is not None
+    except ParseError:
+        return True   # похоже на трисет, но с ошибкой — handle_entry объяснит
+
+
+# ---------- питание и вода ----------
+
+def nut_undo_kb(food_ids: list[int], water_ids: list[int]):
+    data = ",".join([f"f{i}" for i in food_ids] + [f"w{i}" for i in water_ids])
+    kb = InlineKeyboardBuilder()
+    kb.button(text="↩️ Отменить", callback_data="nundo:" + data)
+    return kb.as_markup()
+
+
+def day_summary(user_id: int) -> str:
+    rows = db.food_day(user_id, date.today())
+    water = db.water_day(user_id, date.today())
+    kcal = sum(r["kcal"] for r in rows)
+    protein = sum(r["protein"] for r in rows)
+    p = db.get_profile(user_id)
+    if p:
+        t = nut.targets(p)
+        return (f"За сегодня: {kcal:.0f} / {t['kcal']:.0f} ккал · белок {protein:.0f} / {t['protein']:.0f} г · "
+                f"вода {water:.0f} / {t['water']:.0f} мл")
+    return f"За сегодня: {kcal:.0f} ккал · белок {protein:.0f} г · вода {water:.0f} мл"
+
+
+async def handle_food(message: Message, user_id: int, text: str):
+    items = nut.parse_food_text(text)
+    lines, unknown, food_ids, water_ids = [], [], [], []
+    for it in items:
+        if it.kind == "water":
+            water_ids.append(db.add_water(user_id, it.grams))
+            lines.append(f"💧 Вода +{it.grams:.0f} мл")
+        elif it.status == "none":
+            unknown.append(it.raw)
+        else:
+            n = nut.nutrients(it.key, it.grams)
+            food_ids.append(db.add_food(user_id, it.key, it.grams, n, it.raw))
+            line = "• " + nut.item_line(it.food.name, it.grams, n)
+            if it.status == "guess":
+                line += f"  (понял «{it.raw}» как {it.food.name.lower()})"
+            lines.append(line)
+    out = []
+    if lines:
+        out.append("✅ Записал:\n" + "\n".join(lines))
+    if unknown:
+        out.append("❓ Не нашёл: " + ", ".join(f"«{u}»" for u in unknown) +
+                   "\nНапиши иначе или добавь продукт в файл foods.py.")
+    out.append(day_summary(user_id))
+    kb = nut_undo_kb(food_ids, water_ids) if (food_ids or water_ids) else None
+    await message.answer("\n\n".join(out), reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("nundo:"))
+async def on_nut_undo(cb: CallbackQuery):
+    n = 0
+    for token in cb.data.split(":")[1].split(","):
+        if token.startswith("f"):
+            n += db.delete_food(cb.from_user.id, int(token[1:]))
+        elif token.startswith("w"):
+            n += db.delete_water(cb.from_user.id, int(token[1:]))
+    await cb.message.edit_text(cb.message.text + ("\n\n↩️ Отменено" if n else "\n\n(уже удалено)"))
+    await cb.answer()
+
+
+@router.message(F.text == BTN_WATER)
+async def water_button(message: Message):
+    await add_water_and_reply(message, message.from_user.id, 250)
+
+
+@router.callback_query(F.data.startswith("water:"))
+async def on_water(cb: CallbackQuery):
+    await add_water_and_reply(cb.message, cb.from_user.id, int(cb.data.split(":")[1]))
+    await cb.answer("Записал 💧")
+
+
+async def add_water_and_reply(message: Message, user_id: int, ml: int):
+    wid = db.add_water(user_id, ml)
+    p = db.get_profile(user_id)
+    goal = nut.targets(p)["water"] if p else nut.WATER_GOAL_ML
+    total = db.water_day(user_id, date.today())
+    text = f"💧 +{ml} мл · сегодня {total:.0f} / {goal:.0f} мл {nut.bar(total, goal)}"
+    if total >= goal:
+        text += "\n✅ Норма воды на сегодня выполнена!"
+    await message.answer(text, reply_markup=nut_undo_kb([], [wid]))
+
+
+def food_menu_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Вчера", callback_data="nut:yesterday")
+    kb.button(text="Неделя", callback_data="nut:week")
+    kb.button(text="👤 Профиль и норма", callback_data="nut:profile")
+    kb.adjust(2, 1)
+    return kb.as_markup()
+
+
+def food_day_text(user_id: int, day: date, title: str) -> str:
+    return nut.day_report(db.food_day(user_id, day), db.water_day(user_id, day), db.get_profile(user_id),
+                          f"{title} {day:%d.%m.%Y}")
+
+
+@router.message(Command("food"))
+@router.message(F.text == BTN_FOOD)
+async def food_today(message: Message):
+    await message.answer(food_day_text(message.from_user.id, date.today(), "Питание за"),
+                         reply_markup=food_menu_kb())
+
+
+@router.callback_query(F.data.startswith("nut:"))
+async def on_nut(cb: CallbackQuery):
+    kind = cb.data.split(":")[1]
+    user_id = cb.from_user.id
+    await cb.answer()
+    if kind == "yesterday":
+        await cb.message.answer(food_day_text(user_id, date.today() - timedelta(days=1), "Питание за"))
+    elif kind == "profile":
+        p = db.get_profile(user_id)
+        await cb.message.answer(nut.profile_text(p) if p else "Профиль не заполнен. Пример: профиль 85 180 м 50")
+    elif kind == "week":
+        end = date.today()
+        days = db.nutrition_days(user_id, end - timedelta(days=6), end)
+        if not days:
+            await cb.message.answer("За неделю записей о питании нет.")
+            return
+        p = db.get_profile(user_id)
+        t = nut.targets(p) if p else None
+        k = len(days)
+        avg = {f: sum(d[f] for d in days) / k for f in ("kcal", "protein", "fat", "carbs", "water")}
+        lines = [f"🍽 Питание за 7 дней (дней с записями: {k})", "", "В среднем за день:"]
+        for f, title, unit in (("kcal", "Калории", "ккал"), ("protein", "Белки", "г"), ("fat", "Жиры", "г"),
+                               ("carbs", "Углеводы", "г"), ("water", "Вода", "мл")):
+            line = f"• {title}: {avg[f]:.0f} {unit}"
+            if t:
+                line += f" (норма {t[f]:.0f}, {avg[f] / t[f] * 100:.0f}%)"
+            lines.append(line)
+        if t:
+            ok = sum(1 for d in days if d["water"] >= t["water"])
+            lines.append(f"\n💧 Норма воды выполнена: {ok} из {k} дн.")
+            low_p = sum(1 for d in days if d["protein"] < t["protein"] * 0.8)
+            if low_p:
+                lines.append(f"🥩 Белка мало (< 80% нормы): {low_p} из {k} дн.")
+        await cb.message.answer("\n".join(lines))
+
+
+@router.message(Command("water_off"))
+async def water_off(message: Message):
+    if db.get_profile(message.from_user.id):
+        db.set_profile_field(message.from_user.id, "water_reminders", 0)
+    await message.answer("🔕 Напоминания о воде выключены. Включить: /water_on")
+
+
+@router.message(Command("water_on"))
+async def water_on(message: Message):
+    if not db.get_profile(message.from_user.id):
+        await message.answer("Сначала заполни профиль: профиль 85 180 м 50")
+        return
+    db.set_profile_field(message.from_user.id, "water_reminders", 1)
+    hours = ", ".join(f"{h}:00" for h in REMIND_HOURS)
+    await message.answer(f"🔔 Напоминания о воде включены: {hours}, если пьёшь меньше плана.")
+
+
+def water_reminder_text(user_id: int, now: datetime) -> str | None:
+    """Текст напоминания или None, если пить пока достаточно."""
+    p = db.get_profile(user_id)
+    goal = nut.targets(p)["water"]
+    drunk = db.water_day(user_id, now.date())
+    first, last = REMIND_HOURS[0] - 2, REMIND_HOURS[-1] + 1        # «день воды» с 8:00 до 21:00
+    plan = goal * min(1.0, (now.hour - first) / (last - first))
+    if drunk >= plan - 100:
+        return None
+    return (f"💧 Время выпить воды!\nСегодня: {drunk:.0f} из {goal:.0f} мл {nut.bar(drunk, goal)}\n"
+            f"К этому часу по плану ≈{plan:.0f} мл.")
+
+
+async def water_reminders(bot: Bot):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="+250 мл", callback_data="water:250")
+    kb.button(text="+500 мл", callback_data="water:500")
+    markup = kb.as_markup()
+    while True:
+        await asyncio.sleep(60)
+        now = datetime.now()
+        if now.hour not in REMIND_HOURS:
+            continue
+        stamp = f"{now:%Y-%m-%d} {now.hour}"
+        for p in db.reminder_users():
+            if p["last_reminder"] == stamp:
+                continue
+            db.set_profile_field(p["user_id"], "last_reminder", stamp)
+            try:
+                text = water_reminder_text(p["user_id"], now)
+                if text:
+                    await bot.send_message(p["user_id"], text, reply_markup=markup)
+            except Exception:
+                logging.exception("Не удалось отправить напоминание о воде")
+
+
+# Свободный текст обрабатывается последним, после всех кнопок и команд.
+router.message.register(on_text, F.text)
+
+
 async def main():
     if not TOKEN or TOKEN.startswith("вставь"):
         raise SystemExit("Не найден токен. Открой файл .env и впиши BOT_TOKEN=... (см. README.md)")
@@ -419,7 +676,11 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
     logging.info("Бот запущен. Остановить: Ctrl+C")
-    await dp.start_polling(bot)
+    reminders = asyncio.create_task(water_reminders(bot))
+    try:
+        await dp.start_polling(bot)
+    finally:
+        reminders.cancel()
 
 
 if __name__ == "__main__":

@@ -32,6 +32,45 @@ CREATE TABLE IF NOT EXISTS aliases (
     alias        TEXT PRIMARY KEY,
     exercise_key TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS profile (
+    user_id         INTEGER PRIMARY KEY,
+    weight          REAL NOT NULL,
+    height          REAL NOT NULL,
+    sex             TEXT NOT NULL,      -- m / f
+    age             INTEGER NOT NULL,
+    goal            TEXT NOT NULL DEFAULT 'maintain',
+    water_goal      INTEGER NOT NULL DEFAULT 2000,
+    water_reminders INTEGER NOT NULL DEFAULT 1,
+    last_reminder   TEXT
+);
+CREATE TABLE IF NOT EXISTS weight_log (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    day     TEXT NOT NULL,
+    weight  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS food_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    day        TEXT NOT NULL,
+    food_key   TEXT NOT NULL,
+    grams      REAL NOT NULL,
+    kcal       REAL NOT NULL,
+    protein    REAL NOT NULL,
+    fat        REAL NOT NULL,
+    carbs      REAL NOT NULL,
+    raw_text   TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS water_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    day        TEXT NOT NULL,
+    ml         REAL NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_food_user_day ON food_log(user_id, day);
+CREATE INDEX IF NOT EXISTS idx_water_user_day ON water_log(user_id, day);
 CREATE INDEX IF NOT EXISTS idx_workouts_user_day ON workouts(user_id, day);
 CREATE INDEX IF NOT EXISTS idx_entries_workout ON entries(workout_id);
 CREATE INDEX IF NOT EXISTS idx_sets_entry ON sets(entry_id);
@@ -154,3 +193,81 @@ class DB:
     def save_alias(self, alias: str, exercise_key: str):
         self.conn.execute("INSERT OR REPLACE INTO aliases(alias, exercise_key) VALUES (?,?)", (alias, exercise_key))
         self.conn.commit()
+
+    # --- профиль ---
+    def get_profile(self, user_id: int):
+        return self.conn.execute("SELECT * FROM profile WHERE user_id=?", (user_id,)).fetchone()
+
+    def save_profile(self, user_id: int, weight: float, height: float, sex: str, age: int, goal: str):
+        self.conn.execute(
+            "INSERT INTO profile(user_id, weight, height, sex, age, goal) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET weight=excluded.weight, height=excluded.height, "
+            "sex=excluded.sex, age=excluded.age, goal=excluded.goal",
+            (user_id, weight, height, sex, age, goal))
+        self.log_weight(user_id, weight)
+
+    def log_weight(self, user_id: int, weight: float, day: date | None = None):
+        day = (day or date.today()).isoformat()
+        self.conn.execute("DELETE FROM weight_log WHERE user_id=? AND day=?", (user_id, day))
+        self.conn.execute("INSERT INTO weight_log(user_id, day, weight) VALUES (?,?,?)", (user_id, day, weight))
+        self.conn.execute("UPDATE profile SET weight=? WHERE user_id=?", (weight, user_id))
+        self.conn.commit()
+
+    def weight_history(self, user_id: int):
+        return self.conn.execute("SELECT day, weight FROM weight_log WHERE user_id=? ORDER BY day",
+                                 (user_id,)).fetchall()
+
+    def set_profile_field(self, user_id: int, field: str, value):
+        assert field in ("water_goal", "water_reminders", "last_reminder", "goal")
+        self.conn.execute(f"UPDATE profile SET {field}=? WHERE user_id=?", (value, user_id))
+        self.conn.commit()
+
+    def reminder_users(self):
+        return self.conn.execute("SELECT * FROM profile WHERE water_reminders=1").fetchall()
+
+    # --- еда и вода ---
+    def add_food(self, user_id: int, food_key: str, grams: float, n: dict, raw: str = "",
+                 day: date | None = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO food_log(user_id, day, food_key, grams, kcal, protein, fat, carbs, raw_text, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (user_id, (day or date.today()).isoformat(), food_key, grams, n["kcal"], n["protein"], n["fat"],
+             n["carbs"], raw, now()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def delete_food(self, user_id: int, food_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM food_log WHERE id=? AND user_id=?", (food_id, user_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def food_day(self, user_id: int, day: date):
+        return self.conn.execute("SELECT * FROM food_log WHERE user_id=? AND day=? ORDER BY id",
+                                 (user_id, day.isoformat())).fetchall()
+
+    def add_water(self, user_id: int, ml: float, day: date | None = None) -> int:
+        cur = self.conn.execute("INSERT INTO water_log(user_id, day, ml, created_at) VALUES (?,?,?,?)",
+                                (user_id, (day or date.today()).isoformat(), ml, now()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def delete_water(self, user_id: int, water_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM water_log WHERE id=? AND user_id=?", (water_id, user_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def water_day(self, user_id: int, day: date) -> float:
+        return self.conn.execute("SELECT COALESCE(SUM(ml), 0) FROM water_log WHERE user_id=? AND day=?",
+                                 (user_id, day.isoformat())).fetchone()[0]
+
+    def nutrition_days(self, user_id: int, start: date, end: date):
+        """Итоги по дням: day, kcal, protein, fat, carbs, water."""
+        return self.conn.execute(
+            "SELECT d.day, COALESCE(f.kcal,0) kcal, COALESCE(f.protein,0) protein, COALESCE(f.fat,0) fat, "
+            "COALESCE(f.carbs,0) carbs, COALESCE(w.ml,0) water FROM "
+            "(SELECT day FROM food_log WHERE user_id=:u AND day BETWEEN :s AND :e "
+            " UNION SELECT day FROM water_log WHERE user_id=:u AND day BETWEEN :s AND :e) d "
+            "LEFT JOIN (SELECT day, SUM(kcal) kcal, SUM(protein) protein, SUM(fat) fat, SUM(carbs) carbs "
+            "           FROM food_log WHERE user_id=:u GROUP BY day) f ON f.day=d.day "
+            "LEFT JOIN (SELECT day, SUM(ml) ml FROM water_log WHERE user_id=:u GROUP BY day) w ON w.day=d.day "
+            "ORDER BY d.day", dict(u=user_id, s=start.isoformat(), e=end.isoformat())).fetchall()
