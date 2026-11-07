@@ -29,7 +29,9 @@ m = Matcher()
     ("икры сидя", "calf_seated"), ("икры стоя", "calf_standing"), ("выпады", "lunges"),
     ("тяга штанги в наклоне", "bent_row"), ("подъем коленей", "knee_raise"),
     ("скручивания на наклонной скамье", "crunch_incline"), ("скручивания горизонт", "crunch_flat"),
-    ("жим штанги сидя", "ohp_seated"), ("разводки стоя", "lat_raise"), ("скамья смитта бицепс", "curl_scott"),
+    ("жим штанги сидя", "ohp_seated"), ("гипер", "hyperext"), ("гиперэкст", "hyperext"),
+    ("гиперэкстензия", "hyperext"), ("гиперэкстензии", "hyperext"), ("гиперэкстенция", "hyperext"),
+    ("гипер экстензия", "hyperext"), ("гиперэкстензия с блином", "hyperext"), ("разводки стоя", "lat_raise"), ("скамья смитта бицепс", "curl_scott"),
 ])
 def test_match(query, key):
     r = m.match(query, prefer=TEMPLATES["A"]["exercises"] + TEMPLATES["B"]["exercises"])
@@ -76,6 +78,7 @@ def test_parse_formats():
     assert sets("3х8х16", bw=True) == [(8, 0, 16)] * 3
     assert sets("12 10 8", bw=True) == [(12, 0, 0), (10, 0, 0), (8, 0, 0)]
     assert sets("2х110", bw=True) == [(110, 0, 0)] * 2
+    assert sets("3х15х20", bw=True) == [(15, 0, 20)] * 3   # гиперэкстензия с блином 20 кг
 
 
 @pytest.mark.parametrize("bad", ["", "abc", "60", "50х10х60", "4х0х60", "4х10х900"])

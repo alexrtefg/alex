@@ -42,6 +42,9 @@ EXERCISES = [
     Ex("romanian", "Румынская тяга", "legs", ("румынская", "румынка")),
     Ex("bent_row", "Тяга штанги в наклоне", "back", ("тяга в наклоне", "тяга штанги", "тяга наклон")),
     Ex("shrugs", "Шраги", "back", ("шраги штанга", "шраги со штангой")),
+    Ex("hyperext", "Гиперэкстензия", "back",
+       ("гипер", "гиперэкст", "гиперэкстензии", "гиперэкстензия с блином", "гиперка", "гиперэкстензия с весом",
+        "разгибания спины", "низ спины", "поясница"), bodyweight=True),
     # --- Бицепс ---
     Ex("curl_bb", "Бицепс со штангой", "biceps", ("штанга бицепс", "подъем штанги на бицепс", "бицепс штанга")),
     Ex("curl_kb", "Бицепс с гирей", "biceps", ("гиря бицепс", "бицепс гиря")),
@@ -90,14 +93,14 @@ TEMPLATES = {
     "A": {
         "title": "Тренировка А — грудь, спина, руки",
         "exercises": ["bench", "incline_bench", "db_fly", "dips", "pullups", "bent_row", "deadlift",
-                      "shrugs", "curl_bb", "curl_ez", "curl_db", "curl_kb", "curl_scott",
+                      "shrugs", "hyperext", "curl_bb", "curl_ez", "curl_db", "curl_kb", "curl_scott",
                       "french", "close_grip",
                       # плечи — иногда вместо трицепса, для разнообразия
                       "ohp_seated", "lat_raise"],
     },
     "B": {
         "title": "Тренировка Б — ноги",
-        "exercises": ["squat", "lunges", "romanian", "stiff_deadlift", "calf_seated", "calf_standing"],
+        "exercises": ["squat", "lunges", "romanian", "stiff_deadlift", "hyperext", "calf_seated", "calf_standing"],
     },
 }
 # Пресс делается в каждой тренировке.
