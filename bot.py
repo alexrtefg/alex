@@ -20,13 +20,14 @@ from dotenv import load_dotenv
 
 import reports
 from db import DB
-from exercises import ABS_TRISET, BY_KEY, EXERCISES, GROUPS, REST_LIGHT, TEMPLATES, rest_for
+from exercises import ABS_EXERCISES, ABS_TRISET, BY_KEY, EXERCISES, GROUPS, REST_LIGHT, TEMPLATES, rest_for
 from export import export_xlsx
 from matcher import Matcher
 from parser import ParseError, SetRow, parse_sets, parse_triset, split_name
 from plates import fmt_kg, plates_text
 import nutrition as nut
 from timer import DEFAULT_SIGNAL, Timers, mmss, parse_duration
+import summary
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -44,6 +45,7 @@ if OWNER_ID:  # бот отвечает только владельцу
 pending_pick: dict[int, dict] = {}   # выбор упражнения из вариантов
 pending_text: dict[int, str] = {}    # запись, присланная до начала тренировки
 pending_voice: dict[int, tuple] = {}  # голосовое, которое можно сделать сигналом таймера
+selected: dict[int, str] = {}         # упражнение, выбранное в меню: дальше можно вводить только цифры
 
 
 def get_signal(user_id: int):
@@ -63,22 +65,31 @@ BTN_HELP = "❓ Помощь"
 BTN_FOOD = "🍽 Питание"
 BTN_WATER = "💧 +250 мл"
 BTN_REST = "⏱ Отдых"
+BTN_EXERCISES = "🏋️ Упражнения"
+BTN_DAY = "📋 Итог дня"
+BTN_SLEEP = "😴 Сон"
 
 REMIND_HOURS = [10, 12, 14, 16, 18, 20]   # когда напоминать про воду, если пьёшь меньше плана
 
 MENU = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_FINISH)],
-              [KeyboardButton(text=BTN_REPORT), KeyboardButton(text=BTN_HISTORY)],
+              [KeyboardButton(text=BTN_EXERCISES), KeyboardButton(text=BTN_REST)],
               [KeyboardButton(text=BTN_FOOD), KeyboardButton(text=BTN_WATER)],
-              [KeyboardButton(text=BTN_REST), KeyboardButton(text=BTN_UNDO)],
-              [KeyboardButton(text=BTN_HELP)]],
+              [KeyboardButton(text=BTN_SLEEP), KeyboardButton(text=BTN_DAY)],
+              [KeyboardButton(text=BTN_REPORT), KeyboardButton(text=BTN_HISTORY)],
+              [KeyboardButton(text=BTN_UNDO), KeyboardButton(text=BTN_HELP)]],
     resize_keyboard=True,
-    input_field_placeholder="жим лежа 4х10х60",
+    input_field_placeholder="3 80 8 — подходы, вес, повторы",
 )
 
 HELP = (
-    "🏋️ ТРЕНИРОВКА — одной строкой:\n"
-    "• жим лежа 4х10х60 — 4 подхода по 10 повторов, 60 кг\n"
+    "🏋️ ТРЕНИРОВКА\n"
+    "Проще всего: кнопка «🏋️ Упражнения» → выбери упражнение → вводи только цифры:\n"
+    "• 1 75 10 — 1 подход, 75 кг, 10 раз → запустится таймер отдыха\n"
+    "• 3 80 8 — сразу 3 подхода по 80 кг на 8 раз → таймера не будет, бот спросит, что делаем далее\n"
+    "• гипер: 3 20 15 — с блином 20 кг; подтягивания: 3 0 10 — без веса\n\n"
+    "Или одной строкой с названием:\n"
+    "• жим лежа 3 80 8 · жим лежа 4х10х60\n"
     "• жим лежа 60 10 10 8 8 — вес 60, повторы в каждом подходе\n"
     "• подтягивания 3х10 — свой вес\n"
     "• подтягивания 3х8 +16 — с гирей 16 кг на поясе\n"
@@ -96,6 +107,9 @@ HELP = (
     "• творог 200, 3 яйца, курица 150, хлеб 2 куска\n"
     "• профиль 85 180 м 50 — вес, рост, пол, возраст (можно добавить: набор / похудение)\n"
     "• вес 84,5 — записать вес тела\n\n"
+    "😴 СОН: кнопка «😴 Сон» или «сон 7», «спал 7,5», «сон 23:30-7:00».\n\n"
+    "📋 ИТОГ ДНЯ: тренировка + питание + вода + сон вместе — что в норме, чего не хватает, "
+    "что в избытке и что сделать.\n\n"
     "💧 ВОДА: кнопка «+250 мл» или «вода 500», «вода 2 стакана», «вода 1,5 л».\n"
     "Напоминания: /water_off — выключить, /water_on — включить.\n\n"
     "Ещё:\n"
@@ -133,12 +147,48 @@ async def start_rest(message: Message, user_id: int, seconds: int, label: str):
                        f"После: {label} · отдых {mmss(seconds)}")
 
 
-async def after_record(message: Message, user_id: int, text: str, entry_ids: list[int], seconds: int, label: str):
-    """Ответ на запись + таймер отдыха (сам или по кнопке)."""
+async def after_record(message: Message, user_id: int, text: str, entry_ids: list[int], seconds: int, label: str,
+                       n_sets: int = 1):
+    """Ответ на запись.
+
+    1 подход  -> таймер отдыха (сам или по кнопке), упражнение остаётся выбранным: дальше просто цифры.
+    2+ подхода -> упражнение уже сделано целиком: таймер не нужен, спрашиваем, что делаем далее.
+    """
+    if n_sets > 1:
+        selected.pop(user_id, None)
+        await message.answer(text, reply_markup=undo_kb(entry_ids))
+        await ask_next_exercise(message, user_id, "➡️ Какое упражнение делаем далее?")
+        return
     auto = autorest(user_id)
-    await message.answer(text, reply_markup=undo_kb(entry_ids, None if auto else seconds))
+    await message.answer(text + "\nСледующий подход — просто цифры, например 1 75 10",
+                         reply_markup=undo_kb(entry_ids, None if auto else seconds))
     if auto:
         await start_rest(message, user_id, seconds, label)
+
+
+def exercise_menu_kb(wtype: str | None):
+    kb = InlineKeyboardBuilder()
+    keys = [k for k in template_keys(wtype) if k not in ABS_EXERCISES] if wtype else []
+    for k in keys:
+        kb.button(text=BY_KEY[k].name, callback_data=f"sel:{k}")
+    items = " + ".join(str(r) for _, r in ABS_TRISET["items"])
+    kb.button(text=f"🔥 Пресс-трисет ({items})", callback_data="abs")
+    kb.button(text="📋 Все упражнения по группам", callback_data="selall")
+    kb.adjust(*([2] * (len(keys) // 2) + [1] * (len(keys) % 2) + [1, 1]))
+    return kb.as_markup()
+
+
+async def ask_next_exercise(message: Message, user_id: int, title: str):
+    active = db.active_workout(user_id)
+    await message.answer(title, reply_markup=exercise_menu_kb(active["wtype"] if active else None))
+
+
+def selected_text(user_id: int, key: str, workout_id: int | None) -> str:
+    ex = BY_KEY[key]
+    last = reports.last_result_text(db, user_id, key, workout_id or -1)
+    example = "3 20 15 (подходы, отягощение, повторы) или 3 0 15" if ex.bodyweight else "1 75 10 (подходы, вес, повторы)"
+    return (f"👉 {ex.name}\n{last or 'записей ещё нет'}\n\n"
+            f"Вводи цифры: {example}\nОтдых после подхода: {mmss(rest_for(key))}")
 
 
 def choose_type_kb(suggested: str):
@@ -228,7 +278,7 @@ async def on_workout_type(cb: CallbackQuery):
         return
     prev_same = db.last_workout(user_id, wtype)
     wid = db.start_workout(user_id, wtype)
-    text = f"📅 Тренировка {today_str()}\n{TEMPLATES[wtype]['title']}\n\nЗаписывай: жим лежа 4х10х60"
+    text = f"📅 Тренировка {today_str()}\n{TEMPLATES[wtype]['title']}"
     if prev_same:
         body = reports.workout_report(db, prev_same["id"], title="Прошлый раз —")
         text += "\n\n" + body
@@ -239,6 +289,10 @@ async def on_workout_type(cb: CallbackQuery):
     await cb.answer()
     if user_id in pending_text:
         await handle_entry(cb.message, user_id, pending_text.pop(user_id), wid, wtype)
+    elif user_id in selected:
+        await cb.message.answer(selected_text(user_id, selected[user_id], wid))
+    else:
+        await ask_next_exercise(cb.message, user_id, "🏋️ С какого упражнения начинаем?")
 
 
 @router.message(Command("finish"))
@@ -291,7 +345,7 @@ async def save_triset(message: Message, workout_id: int, rounds: int, reps: list
         ids.append(db.add_entry(workout_id, key, [SetRow(r) for _ in range(rounds)], "трисет"))
         lines.append(f"• {reports.ex_name(key)} — {rounds}×{r}")
     await after_record(message, message_user(message), f"✅ {ABS_TRISET['title']}, кругов: {rounds}\n" + "\n".join(lines),
-                       ids, REST_LIGHT, ABS_TRISET["title"])
+                       ids, REST_LIGHT, ABS_TRISET["title"], n_sets=rounds)
 
 
 # ---------- отчёты ----------
@@ -373,10 +427,9 @@ async def on_pick(cb: CallbackQuery):
 
 async def save_entry(message: Message, user_id: int, workout_id: int, key: str, numbers: str, raw: str):
     ex = BY_KEY[key]
+    selected[user_id] = key
     if not numbers:
-        last = reports.last_result_text(db, user_id, key, workout_id)
-        await message.answer(f"{ex.name}: {last or 'записей ещё нет'}\n"
-                             f"Напиши подходы, например: {raw} 4х10х60")
+        await message.answer(selected_text(user_id, key, workout_id))
         return
     try:
         rows = parse_sets(numbers, bodyweight=ex.bodyweight)
@@ -392,7 +445,7 @@ async def save_entry(message: Message, user_id: int, workout_id: int, key: str, 
     last = reports.last_result_text(db, user_id, key, workout_id)
     if last:
         text += f"\n↗️ {last}"
-    await after_record(message, user_id, text, [entry_id], rest_for(key), ex.name)
+    await after_record(message, user_id, text, [entry_id], rest_for(key), ex.name, n_sets=len(rows))
 
 
 # ---------- свободный текст: записи, блины, прогресс ----------
@@ -403,6 +456,25 @@ async def on_text(message: Message):
     low = text.lower().replace("ё", "е")
     if low.startswith("/"):
         await message.answer("Не знаю такую команду.\n\n" + HELP)
+        return
+
+    m = re.fullmatch(r"(сон|спал|спала|поспал)\s+(.+)", low)
+    if m:
+        hours = summary.parse_sleep(m.group(2))
+        if hours is None:
+            await message.answer("Напиши так: сон 7 · спал 7,5 · сон 23:30-7:00")
+            return
+        await save_sleep(message, user_id, hours)
+        return
+
+    if re.fullmatch(r"[\d\s.,+хx*×]+", low) and re.search(r"\d", low):   # только цифры: 1 75 10
+        active = db.active_workout(user_id)
+        if not active or active["day"] != date.today().isoformat():
+            pending_text[user_id] = text
+            await message.answer("Сначала выбери тренировку, и я сразу запишу это.")
+            await ask_workout_type(message, user_id)
+            return
+        await handle_entry(message, user_id, text, active["id"], active["wtype"])
         return
 
     m = re.fullmatch(r"(отдых|таймер)\s*(.*)", low)
@@ -500,7 +572,11 @@ async def handle_entry(message: Message, user_id: int, text: str, workout_id: in
 
     name, numbers = split_name(text)
     if not name:
-        await message.answer("Начни с названия упражнения, например: жим лежа 4х10х60")
+        key = selected.get(user_id)
+        if not key:
+            await ask_next_exercise(message, user_id, "Сначала выбери упражнение, потом вводи цифры (например 1 75 10):")
+            return
+        await save_entry(message, user_id, workout_id, key, numbers, BY_KEY[key].name)
         return
     res = matcher.match(name, prefer=template_keys(wtype))
     if res.status == "ok":
@@ -821,6 +897,111 @@ async def on_signal_choice(cb: CallbackQuery):
         await cb.message.edit_text("🔔 Готово! Это голосовое придёт в конце каждого отдыха. Убрать: /signal_reset")
     else:
         await cb.message.edit_text("Хорошо, не меняю сигнал.")
+
+
+# ---------- меню упражнений ----------
+
+@router.message(Command("ex"))
+@router.message(F.text == BTN_EXERCISES)
+async def exercises_button(message: Message):
+    user_id = message.from_user.id
+    active = db.active_workout(user_id)
+    if not active or active["day"] != date.today().isoformat():
+        await ask_workout_type(message, user_id)
+        return
+    await ask_next_exercise(message, user_id, "🏋️ Выбери упражнение:")
+
+
+@router.callback_query(F.data.startswith("sel:"))
+async def on_select(cb: CallbackQuery):
+    key = cb.data.split(":")[1]
+    user_id = cb.from_user.id
+    await cb.answer(BY_KEY[key].name)
+    selected[user_id] = key
+    active = db.active_workout(user_id)
+    if not active or active["day"] != date.today().isoformat():
+        await ask_workout_type(cb.message, user_id)
+        return
+    await cb.message.answer(selected_text(user_id, key, active["id"]))
+
+
+@router.callback_query(F.data == "selall")
+async def on_select_all(cb: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    for g, title in GROUPS.items():
+        kb.button(text=title, callback_data=f"selgrp:{g}")
+    kb.adjust(3)
+    await cb.answer()
+    await cb.message.answer("Выбери группу мышц:", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("selgrp:"))
+async def on_select_group(cb: CallbackQuery):
+    g = cb.data.split(":")[1]
+    kb = InlineKeyboardBuilder()
+    for e in EXERCISES:
+        if e.group == g:
+            kb.button(text=e.name, callback_data=f"sel:{e.key}")
+    kb.adjust(1)
+    await cb.answer()
+    await cb.message.answer(f"{GROUPS[g]}:", reply_markup=kb.as_markup())
+
+
+# ---------- сон и итог дня ----------
+
+async def save_sleep(message: Message, user_id: int, hours: float):
+    db.set_sleep(user_id, hours)
+    text = f"😴 Сон {summary.fmt_hours(hours)} записан (норма {summary.SLEEP_MIN:g}–{summary.SLEEP_MAX:g} ч)."
+    if hours < 6:
+        text += "\nМало. Сегодня без рекордов — работай в обычных весах и ляг пораньше."
+    elif hours < summary.SLEEP_MIN:
+        text += "\nЧуть меньше нормы."
+    else:
+        text += "\n✅ Отлично выспался!"
+    await message.answer(text)
+
+
+@router.message(Command("sleep"))
+@router.message(F.text == BTN_SLEEP)
+async def sleep_button(message: Message):
+    kb = InlineKeyboardBuilder()
+    for h in (5, 6, 7, 8, 9):
+        kb.button(text=f"{h} ч", callback_data=f"sleep:{h}")
+    for h in (5.5, 6.5, 7.5, 8.5):
+        kb.button(text=f"{h:g} ч".replace(".", ","), callback_data=f"sleep:{h}")
+    kb.adjust(5, 4)
+    cur = db.get_sleep(message.from_user.id, date.today())
+    head = f"Сейчас записано: {summary.fmt_hours(cur)}\n" if cur else ""
+    await message.answer(head + "😴 Сколько спал этой ночью? Или напиши: сон 23:30-7:00",
+                         reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("sleep:"))
+async def on_sleep(cb: CallbackQuery):
+    await cb.answer()
+    await save_sleep(cb.message, cb.from_user.id, float(cb.data.split(":")[1]))
+
+
+def day_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Вчера", callback_data="sum:yesterday")
+    kb.button(text="Неделя", callback_data="sum:week")
+    return kb.as_markup()
+
+
+@router.message(Command("day"))
+@router.message(F.text == BTN_DAY)
+async def day_button(message: Message):
+    await message.answer(summary.day_summary(db, message.from_user.id), reply_markup=day_kb())
+
+
+@router.callback_query(F.data.startswith("sum:"))
+async def on_summary(cb: CallbackQuery):
+    await cb.answer()
+    if cb.data == "sum:week":
+        await cb.message.answer(summary.week_summary(db, cb.from_user.id))
+    else:
+        await cb.message.answer(summary.day_summary(db, cb.from_user.id, date.today() - timedelta(days=1)))
 
 
 # Чужие сообщения (если указан OWNER_ID): не молчим, а объясняем и пишем в журнал.

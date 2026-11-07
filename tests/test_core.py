@@ -77,11 +77,18 @@ def test_parse_formats():
     assert sets("3х8 +16", bw=True) == [(8, 0, 16)] * 3
     assert sets("3х8х16", bw=True) == [(8, 0, 16)] * 3
     assert sets("12 10 8", bw=True) == [(12, 0, 0), (10, 0, 0), (8, 0, 0)]
+    # короткий формат «подходы вес повторы»
+    assert sets("1 75 10") == [(10, 75, 0)]
+    assert sets("3 80 8") == [(8, 80, 0)] * 3
+    assert sets("3 57.5 10") == [(10, 57.5, 0)] * 3
+    assert sets("3 20 15", bw=True) == [(15, 0, 20)] * 3   # гипер с блином 20
+    assert sets("3 0 12", bw=True) == [(12, 0, 0)] * 3
+    assert sets("60 10 10 8") == [(10, 60, 0), (10, 60, 0), (8, 60, 0)]
     assert sets("2х110", bw=True) == [(110, 0, 0)] * 2
     assert sets("3х15х20", bw=True) == [(15, 0, 20)] * 3   # гиперэкстензия с блином 20 кг
 
 
-@pytest.mark.parametrize("bad", ["", "abc", "60", "50х10х60", "4х0х60", "4х10х900"])
+@pytest.mark.parametrize("bad", ["", "abc", "60", "50х10х60", "4х0х60", "4х10х900", "3 900 8"])
 def test_parse_errors(bad):
     with pytest.raises(ParseError):
         parse_sets(bad)
@@ -206,3 +213,29 @@ def test_rest_and_duration():
     assert rest_for("bench") == 120 and rest_for("curl_db") == 90 and rest_for(None) == 90
     assert [parse_duration(x) for x in ["90", "2:30", "3", "1,5", "2 мин", "abc"]] == [90, 150, 180, 90, 120, None]
     assert mmss(125) == "2:05"
+
+
+def test_sleep_parse():
+    from summary import parse_sleep
+    assert [parse_sleep(x) for x in ["7", "7,5", "7:30", "23:30-7:00", "23-7", "7 ч 30 мин", "0", "abc"]] == \
+        [7, 7.5, 7.5, 7.5, 8, 7.5, None, None]
+
+
+def test_day_and_week_summary(tmp_path):
+    from datetime import datetime
+    import summary
+    db = DB(str(tmp_path / "s.db"))
+    db.save_profile(1, 85, 180, "m", 50, "maintain")
+    day = date(2026, 11, 7)
+    w = db.start_workout(1, "A", day)
+    db.add_entry(w, "bench", parse_sets("3 80 8"))
+    for it in nut.parse_food_text("творог 200, гречка 200, курица 300, 2 банана, стакан молока, хлеб 3 куска"):
+        db.add_food(1, it.key, it.grams, nut.nutrients(it.key, it.grams), day=day)
+    db.add_water(1, 2000, day=day)
+    db.set_sleep(1, 5, day=day)
+    txt = summary.day_summary(db, 1, day, now=datetime(2026, 11, 7, 22))
+    assert "тоннаж 1920 кг" in txt and "Сон 5 ч" in txt
+    assert "вода" in txt.split("✅ В норме:")[1].split("\n")[0]
+    assert "сон −2 ч" in txt and "Мало сна" in txt
+    wk = summary.week_summary(db, 1, day)
+    assert "Тренировок: 1" in wk and "Сон в среднем 5 ч" in wk

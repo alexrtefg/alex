@@ -71,6 +71,12 @@ CREATE TABLE IF NOT EXISTS water_log (
 );
 CREATE INDEX IF NOT EXISTS idx_food_user_day ON food_log(user_id, day);
 CREATE INDEX IF NOT EXISTS idx_water_user_day ON water_log(user_id, day);
+CREATE TABLE IF NOT EXISTS sleep_log (
+    user_id INTEGER NOT NULL,
+    day     TEXT NOT NULL,          -- день, в который проснулся
+    hours   REAL NOT NULL,
+    PRIMARY KEY (user_id, day)
+);
 CREATE TABLE IF NOT EXISTS settings (
     user_id INTEGER NOT NULL,
     key     TEXT NOT NULL,
@@ -286,3 +292,18 @@ class DB:
     def set_setting(self, user_id: int, key: str, value: str | None):
         self.conn.execute("INSERT OR REPLACE INTO settings(user_id, key, value) VALUES (?,?,?)", (user_id, key, value))
         self.conn.commit()
+
+    # --- сон ---
+    def set_sleep(self, user_id: int, hours: float, day: date | None = None):
+        self.conn.execute("INSERT OR REPLACE INTO sleep_log(user_id, day, hours) VALUES (?,?,?)",
+                          (user_id, (day or date.today()).isoformat(), hours))
+        self.conn.commit()
+
+    def get_sleep(self, user_id: int, day: date) -> float | None:
+        row = self.conn.execute("SELECT hours FROM sleep_log WHERE user_id=? AND day=?",
+                                (user_id, day.isoformat())).fetchone()
+        return row["hours"] if row else None
+
+    def sleep_between(self, user_id: int, start: date, end: date):
+        return self.conn.execute("SELECT day, hours FROM sleep_log WHERE user_id=? AND day BETWEEN ? AND ? ORDER BY day",
+                                 (user_id, start.isoformat(), end.isoformat())).fetchall()

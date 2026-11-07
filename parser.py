@@ -56,16 +56,22 @@ def parse_sets(numbers: str, bodyweight: bool = False) -> list[SetRow]:
         rows = [SetRow(reps, weight, extra) for _ in range(sets)]
         return _check(rows)
 
-    # 60 10 10 8 8 (вес, потом повторы) | для упражнений с собственным весом: 12 10 8 [+16]
+    # 3 80 8 — подходы, вес, повторы (главный короткий формат; для упражнений с собственным весом
+    #          вес = отягощение: «гипер 3 20 15», «подтягивания 3 0 10»)
+    # 60 10 10 8 8 — вес, потом повторы каждого подхода | собственный вес: 12 10 8 [+16]
     m = re.fullmatch(rf"({NUM}(?:\s+{NUM})*)(?:\s*\+({NUM}))?", s)
     if m:
         nums = m.group(1).split()
         extra = _f(m.group(2))
+        if len(nums) == 3 and nums[0].isdigit() and nums[2].isdigit() and 1 <= int(nums[0]) <= 10:
+            sets, w, reps = int(nums[0]), float(nums[1]), int(nums[2])
+            row = SetRow(reps, 0.0, w + extra) if bodyweight else SetRow(reps, w, extra)
+            return _check([SetRow(row.reps, row.weight, row.extra) for _ in range(sets)])
         if bodyweight:
             reps_list, weight = nums, 0.0
         else:
             if len(nums) < 2:
-                raise ParseError("Нужны вес и повторы. Пример: жим лежа 60 10 10 8 или 4х10х60")
+                raise ParseError("Нужны подходы, вес и повторы. Пример: 3 80 8 (3 подхода по 80 кг на 8 раз)")
             weight, reps_list = float(nums[0]), nums[1:]
         rows = []
         for r in reps_list:
@@ -74,7 +80,7 @@ def parse_sets(numbers: str, bodyweight: bool = False) -> list[SetRow]:
             rows.append(SetRow(int(r), weight, extra))
         return _check(rows)
 
-    raise ParseError("Не понял цифры. Примеры: 4х10х60 · 60 10 10 8 · 3х8 +16")
+    raise ParseError("Не понял цифры. Формат: подходы вес повторы — например 3 80 8 или 1 75 10")
 
 
 def _check(rows: list[SetRow]) -> list[SetRow]:
