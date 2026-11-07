@@ -1,4 +1,10 @@
 """Телеграм-бот «Дневник тренировок». Запуск: python bot.py"""
+try:  # Касперский подменяет сертификаты HTTPS: берём доверенные сертификаты из Windows, а не только из Python
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 import asyncio
 import logging
 import os
