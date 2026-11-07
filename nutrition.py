@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 
 from foods import BY_KEY as FOOD_BY_KEY
-from foods import FOODS, PROTEIN_SUGGESTIONS, SIZES, UNIT_CANON, UNITS, WORD_NUMBERS
+from foods import FOODS, GLASS_ML, PROTEIN_SUGGESTIONS, SIZES, UNIT_CANON, UNITS, WORD_NUMBERS
 from matcher import Matcher, normalize
 
 food_matcher = Matcher(catalog={f.key: [f.name, *f.aliases] for f in FOODS})
@@ -100,13 +100,13 @@ def parse_item(segment: str) -> FoodItem:
         if abs_grams is not None:
             item.grams = abs_grams
         elif unit:
-            item.grams = count * (UNITS.get(unit) or 250)
+            item.grams = count * (UNITS.get(unit) or GLASS_ML)
         elif numbers:
             n = numbers[0]
             # 500 -> мл; 1.5 -> литры; 2 -> стаканы
-            item.grams = n if n >= 50 else (n * 1000 if n != int(n) else n * 250)
+            item.grams = n if n >= 50 else (n * 1000 if n != int(n) else n * GLASS_ML)
         else:
-            item.grams = 250
+            item.grams = GLASS_ML
         return item
 
     res = food_matcher.match(name_s)
@@ -240,7 +240,7 @@ def day_report(rows, water_ml: float, profile, title: str) -> str:
     goal_w = t["water"] if t else WATER_GOAL_ML
     left = goal_w - water_ml
     w_line = f"💧 Вода: {water_ml:.0f} / {goal_w:.0f} мл {bar(water_ml, goal_w)}"
-    w_line += f" — осталось {left:.0f} мл (≈{left / 250:.0f} стак.)" if left > 0 else " ✅"
+    w_line += f" — осталось {left:.0f} мл (≈{left / GLASS_ML:.0f} стак. по {GLASS_ML} мл)" if left > 0 else " ✅"
     lines.append(w_line)
     if t and t["protein"] - tot["protein"] > 15:
         gap = t["protein"] - tot["protein"]

@@ -234,8 +234,15 @@ class DB:
         self.conn.execute(f"UPDATE profile SET {field}=? WHERE user_id=?", (value, user_id))
         self.conn.commit()
 
-    def reminder_users(self):
-        return self.conn.execute("SELECT * FROM profile WHERE water_reminders=1").fetchall()
+    def reminder_users(self) -> list[int]:
+        """Кому слать напоминания о воде: все, кто пользуется ботом, кроме выключивших (/water_off)."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT user_id FROM ("
+            " SELECT user_id FROM settings WHERE key='known'"
+            " UNION SELECT user_id FROM profile"
+            " UNION SELECT user_id FROM water_log UNION SELECT user_id FROM food_log"
+            " UNION SELECT user_id FROM workouts)").fetchall()
+        return [r["user_id"] for r in rows if self.get_setting(r["user_id"], "water_rem", "1") == "1"]
 
     # --- еда и вода ---
     def add_food(self, user_id: int, food_key: str, grams: float, n: dict, raw: str = "",

@@ -63,13 +63,14 @@ BTN_HISTORY = "📅 История"
 BTN_UNDO = "↩️ Отменить последнее"
 BTN_HELP = "❓ Помощь"
 BTN_FOOD = "🍽 Питание"
-BTN_WATER = "💧 +250 мл"
+BTN_WATER = "💧 +200 мл"
 BTN_REST = "⏱ Отдых"
 BTN_EXERCISES = "🏋️ Упражнения"
 BTN_DAY = "📋 Итог дня"
 BTN_SLEEP = "😴 Сон"
 
-REMIND_HOURS = [10, 12, 14, 16, 18, 20]   # когда напоминать про воду, если пьёшь меньше плана
+REMIND_HOURS = [9, 11, 13, 15, 17, 19, 21]   # когда напоминать про воду, пока не выпита норма
+GLASS = nut.GLASS_ML                         # стакан воды, мл
 
 MENU = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_FINISH)],
@@ -110,8 +111,9 @@ HELP = (
     "😴 СОН: кнопка «😴 Сон» или «сон 7», «спал 7,5», «сон 23:30-7:00».\n\n"
     "📋 ИТОГ ДНЯ: тренировка + питание + вода + сон вместе — что в норме, чего не хватает, "
     "что в избытке и что сделать.\n\n"
-    "💧 ВОДА: кнопка «+250 мл» или «вода 500», «вода 2 стакана», «вода 1,5 л».\n"
-    "Напоминания: /water_off — выключить, /water_on — включить.\n\n"
+    "💧 ВОДА: кнопка «+200 мл» (стакан) или «вода 500», «вода 2 стакана», «вода 1,5 л».\n"
+    "Напоминания каждые 2 часа с 9 до 21, пока не выпита норма: /water_off — выключить, /water_on — включить, "
+    "/water_test — проверить.\n\n"
     "Ещё:\n"
     "• блины 90 — что повесить на гриф (блины ez 40 — для EZ-грифа)\n"
     "• гантели 10 — как собрать пару наборных гантелей по 10 кг\n"
@@ -204,6 +206,7 @@ def choose_type_kb(suggested: str):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
+    db.set_setting(message.from_user.id, "known", "1")   # чтобы приходили напоминания о воде
     await message.answer(
         "Привет! Я твой дневник тренировок и питания 💪\n\n" + HELP +
         "\n\nНачни с профиля, чтобы я посчитал твою норму: профиль 85 180 м 50" +
@@ -506,7 +509,7 @@ async def on_text(message: Message):
             return
         db.save_profile(user_id, **p)
         await message.answer(nut.profile_text(db.get_profile(user_id)) +
-                             "\n\n💧 Напоминания о воде включены (/water_off — выключить).")
+                             "\n\n💧 Напоминания о воде: каждые 2 часа с 9 до 21, пока не выпита норма (/water_off — выключить).")
         return
 
     m = re.fullmatch(r"вес\s*(\d+(?:[.,]\d+)?)\s*(кг)?", low)
@@ -665,7 +668,7 @@ async def on_nut_undo(cb: CallbackQuery):
 
 @router.message(F.text == BTN_WATER)
 async def water_button(message: Message):
-    await add_water_and_reply(message, message.from_user.id, 250)
+    await add_water_and_reply(message, message.from_user.id, GLASS)
 
 
 @router.callback_query(F.data.startswith("water:"))
@@ -744,53 +747,61 @@ async def on_nut(cb: CallbackQuery):
 
 @router.message(Command("water_off"))
 async def water_off(message: Message):
-    if db.get_profile(message.from_user.id):
-        db.set_profile_field(message.from_user.id, "water_reminders", 0)
+    db.set_setting(message.from_user.id, "water_rem", "0")
     await message.answer("🔕 Напоминания о воде выключены. Включить: /water_on")
 
 
 @router.message(Command("water_on"))
 async def water_on(message: Message):
-    if not db.get_profile(message.from_user.id):
-        await message.answer("Сначала заполни профиль: профиль 85 180 м 50")
-        return
-    db.set_profile_field(message.from_user.id, "water_reminders", 1)
+    db.set_setting(message.from_user.id, "water_rem", "1")
     hours = ", ".join(f"{h}:00" for h in REMIND_HOURS)
-    await message.answer(f"🔔 Напоминания о воде включены: {hours}, если пьёшь меньше плана.")
+    await message.answer(f"🔔 Напоминания о воде включены: {hours} — пока не выпита дневная норма.\n"
+                         "Проверить прямо сейчас: /water_test")
+
+
+@router.message(Command("water_test"))
+async def water_test(message: Message):
+    text = water_reminder_text(message.from_user.id, datetime.now()) or "✅ Норма воды на сегодня уже выполнена!"
+    await message.answer(text, reply_markup=water_kb())
+
+
+def water_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"+{GLASS} мл", callback_data=f"water:{GLASS}")
+    kb.button(text=f"+{2 * GLASS} мл", callback_data=f"water:{2 * GLASS}")
+    return kb.as_markup()
 
 
 def water_reminder_text(user_id: int, now: datetime) -> str | None:
-    """Текст напоминания или None, если пить пока достаточно."""
+    """Текст напоминания или None, если дневная норма уже выпита."""
     p = db.get_profile(user_id)
-    goal = nut.targets(p)["water"]
+    goal = nut.targets(p)["water"] if p else nut.WATER_GOAL_ML
     drunk = db.water_day(user_id, now.date())
-    first, last = REMIND_HOURS[0] - 2, REMIND_HOURS[-1] + 1        # «день воды» с 8:00 до 21:00
-    plan = goal * min(1.0, (now.hour - first) / (last - first))
-    if drunk >= plan - 100:
+    if drunk >= goal:
         return None
+    left = goal - drunk
+    hours_left = sum(1 for h in REMIND_HOURS if h > now.hour) + 1
+    per = min(2 * GLASS, max(GLASS, round(left / hours_left / 50) * 50))   # за раз 1–2 стакана, не больше
     return (f"💧 Время выпить воды!\nСегодня: {drunk:.0f} из {goal:.0f} мл {nut.bar(drunk, goal)}\n"
-            f"К этому часу по плану ≈{plan:.0f} мл.")
+            f"Осталось {left:.0f} мл (≈{left / GLASS:.0f} стак. по {GLASS} мл). Сейчас выпей ≈{per} мл.")
 
 
 async def water_reminders(bot: Bot):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="+250 мл", callback_data="water:250")
-    kb.button(text="+500 мл", callback_data="water:500")
-    markup = kb.as_markup()
+    sent: set[str] = set()
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
         now = datetime.now()
         if now.hour not in REMIND_HOURS:
             continue
-        stamp = f"{now:%Y-%m-%d} {now.hour}"
-        for p in db.reminder_users():
-            if p["last_reminder"] == stamp:
+        for uid in db.reminder_users():
+            stamp = f"{uid} {now:%Y-%m-%d} {now.hour}"
+            if stamp in sent:
                 continue
-            db.set_profile_field(p["user_id"], "last_reminder", stamp)
+            sent.add(stamp)
             try:
-                text = water_reminder_text(p["user_id"], now)
+                text = water_reminder_text(uid, now)
                 if text:
-                    await bot.send_message(p["user_id"], text, reply_markup=markup)
+                    await bot.send_message(uid, text, reply_markup=water_kb())
             except Exception:
                 logging.exception("Не удалось отправить напоминание о воде")
 

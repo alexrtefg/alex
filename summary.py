@@ -149,7 +149,7 @@ def day_summary(db: DB, user_id: int, day: date | None = None, now: datetime | N
     else:
         low.append(f"вода −{water_goal - water:.0f} мл")
         if water < water_goal * 0.75:
-            tips.append(f"💧 Выпей ещё {water_goal - water:.0f} мл (≈{(water_goal - water) / 250:.0f} стак.) — "
+            tips.append(f"💧 Выпей ещё {water_goal - water:.0f} мл (≈{(water_goal - water) / nut.GLASS_ML:.0f} стак. по {nut.GLASS_ML} мл) — "
                         "нехватка воды снижает силу и выносливость.")
 
     # --- сон ---

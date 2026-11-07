@@ -156,7 +156,7 @@ def test_generic_words_not_learned():
 
 @pytest.mark.parametrize("text,expected", [
     ("суп тарелка, 2 яблока средних, 1 банан, стакан молока, каши гречневой тарелку 150-200 грамм",
-     [("soup", 300), ("apple", 300), ("banana", 120), ("milk", 250), ("buckwheat", 175)]),
+     [("soup", 300), ("apple", 300), ("banana", 120), ("milk", 200), ("buckwheat", 175)]),
     ("съел тарелку супа и 2 яблока", [("soup", 300), ("apple", 300)]),
     ("творог 200г", [("cottage5", 200)]),
     ("полтарелки борща", [("borsch", 150)]),
@@ -165,7 +165,7 @@ def test_generic_words_not_learned():
     ("большое яблоко", [("apple", 195)]),
     ("хлеб 2 куска", [("bread_white", 60)]),
     ("вода 500", [("water", 500)]),
-    ("выпил воды 2 стакана", [("water", 500)]),
+    ("выпил воды 2 стакана", [("water", 400)]),
     ("вода 1,5 л", [("water", 1500)]),
 ])
 def test_food_parse(text, expected):
@@ -239,3 +239,9 @@ def test_day_and_week_summary(tmp_path):
     assert "сон −2 ч" in txt and "Мало сна" in txt
     wk = summary.week_summary(db, 1, day)
     assert "Тренировок: 1" in wk and "Сон в среднем 5 ч" in wk
+
+
+def test_glass_is_200():
+    assert nut.parse_food_text("стакан воды")[0].grams == 200
+    assert nut.parse_food_text("вода")[0].grams == 200
+    assert nut.parse_food_text("стакан кефира")[0].grams == 200
