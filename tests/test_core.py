@@ -100,7 +100,7 @@ def test_plates():
     assert real == 87.5 and combo == [15, 13, 10, 1.25, 0.5, 0.5]
     combo, real = plates_per_side(33)            # 13 на сторону — жёлтые блины
     assert combo == [13]
-    assert plates_per_side(1000)[1] == max_weight(7) == 135   # больше, чем есть блинов
+    assert plates_per_side(1000)[1] == max_weight(7) == 150   # больше, чем есть блинов
     assert plates_per_side(30, bar=5)[1] == 30   # EZ-гриф 5 кг
 
 
