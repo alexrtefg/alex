@@ -823,6 +823,24 @@ async def on_signal_choice(cb: CallbackQuery):
         await cb.message.edit_text("Хорошо, не меняю сигнал.")
 
 
+# Чужие сообщения (если указан OWNER_ID): не молчим, а объясняем и пишем в журнал.
+stranger_router = Router()
+
+
+@stranger_router.message()
+async def on_stranger(message: Message):
+    uid = message.from_user.id if message.from_user else 0
+    logging.warning("Сообщение от ID %s не принято: в .env стоит OWNER_ID=%s. "
+                    "Если это ты, впиши OWNER_ID=%s и перезапусти бота.", uid, OWNER_ID, uid)
+    await message.answer(f"⛔ Это личный бот.\nТвой Telegram ID: {uid}\n\n"
+                         f"Если это твой бот: открой файл .env, впиши OWNER_ID={uid} и перезапусти start.bat.")
+
+
+@stranger_router.callback_query()
+async def on_stranger_cb(cb: CallbackQuery):
+    await cb.answer("Это личный бот", show_alert=True)
+
+
 # Свободный текст обрабатывается последним, после всех кнопок и команд.
 router.message.register(on_text, F.text)
 
@@ -834,6 +852,11 @@ async def main():
     bot = Bot(TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
+    dp.include_router(stranger_router)
+    if OWNER_ID:
+        logging.info("Бот отвечает только владельцу: OWNER_ID=%s", OWNER_ID)
+    else:
+        logging.info("OWNER_ID не указан: бот отвечает всем. Свой ID узнаешь по команде /start")
     logging.info("Бот запущен. Остановить: Ctrl+C")
     reminders = asyncio.create_task(water_reminders(bot))
     try:
