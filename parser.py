@@ -67,6 +67,9 @@ def parse_sets(numbers: str, bodyweight: bool = False) -> list[SetRow]:
             sets, w, reps = int(nums[0]), float(nums[1]), int(nums[2])
             row = SetRow(reps, 0.0, w + extra) if bodyweight else SetRow(reps, w, extra)
             return _check([SetRow(row.reps, row.weight, row.extra) for _ in range(sets)])
+        if bodyweight and len(nums) == 2 and nums[0].isdigit() and nums[1].isdigit() and 1 <= int(nums[0]) <= 10:
+            # подтягивания 1 10 — 1 подход на 10 раз; 3 12 — 3 подхода по 12
+            return _check([SetRow(int(nums[1]), 0.0, extra) for _ in range(int(nums[0]))])
         if bodyweight:
             reps_list, weight = nums, 0.0
         else:

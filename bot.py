@@ -88,7 +88,7 @@ HELP = (
     "Проще всего: кнопка «🏋️ Упражнения» → выбери упражнение → вводи только цифры:\n"
     "• 1 75 10 — 1 подход, 75 кг, 10 раз → запустится таймер отдыха\n"
     "• 3 80 8 — сразу 3 подхода по 80 кг на 8 раз → таймера не будет, бот спросит, что делаем далее\n"
-    "• гипер: 3 20 15 — с блином 20 кг; подтягивания: 3 0 10 — без веса\n\n"
+    "• подтягивания, брусья, гипер: 1 10 — 1 подход на 10 раз; 1 20 10 — с весом 20 кг\n\n"
     "Или одной строкой с названием:\n"
     "• жим лежа 3 80 8 · жим лежа 4х10х60\n"
     "• жим лежа 60 10 10 8 8 — вес 60, повторы в каждом подходе\n"
@@ -150,7 +150,7 @@ async def start_rest(message: Message, user_id: int, seconds: int, label: str):
 
 
 async def after_record(message: Message, user_id: int, text: str, entry_ids: list[int], seconds: int, label: str,
-                       n_sets: int = 1):
+                       n_sets: int = 1, hint: str = "1 75 10"):
     """Ответ на запись.
 
     1 подход  -> таймер отдыха (сам или по кнопке), упражнение остаётся выбранным: дальше просто цифры.
@@ -162,7 +162,7 @@ async def after_record(message: Message, user_id: int, text: str, entry_ids: lis
         await ask_next_exercise(message, user_id, "➡️ Какое упражнение делаем далее?")
         return
     auto = autorest(user_id)
-    await message.answer(text + "\nСледующий подход — просто цифры, например 1 75 10",
+    await message.answer(text + f"\nСледующий подход — просто цифры, например {hint}",
                          reply_markup=undo_kb(entry_ids, None if auto else seconds))
     if auto:
         await start_rest(message, user_id, seconds, label)
@@ -188,7 +188,8 @@ async def ask_next_exercise(message: Message, user_id: int, title: str):
 def selected_text(user_id: int, key: str, workout_id: int | None) -> str:
     ex = BY_KEY[key]
     last = reports.last_result_text(db, user_id, key, workout_id or -1)
-    example = "3 20 15 (подходы, отягощение, повторы) или 3 0 15" if ex.bodyweight else "1 75 10 (подходы, вес, повторы)"
+    example = ("1 10 (подходы, повторы) · с весом: 1 20 10 (подходы, отягощение, повторы)"
+               if ex.bodyweight else "1 75 10 (подходы, вес, повторы)")
     return (f"👉 {ex.name}\n{last or 'записей ещё нет'}\n\n"
             f"Вводи цифры: {example}\nОтдых после подхода: {mmss(rest_for(key))}")
 
@@ -448,7 +449,10 @@ async def save_entry(message: Message, user_id: int, workout_id: int, key: str, 
     last = reports.last_result_text(db, user_id, key, workout_id)
     if last:
         text += f"\n↗️ {last}"
-    await after_record(message, user_id, text, [entry_id], rest_for(key), ex.name, n_sets=len(rows))
+    r0 = rows[0]
+    hint = (f"1 {r0.reps}" if not r0.extra else f"1 {fmt_kg(r0.extra)} {r0.reps}") if ex.bodyweight \
+        else f"1 {fmt_kg(r0.weight)} {r0.reps}"
+    await after_record(message, user_id, text, [entry_id], rest_for(key), ex.name, n_sets=len(rows), hint=hint)
 
 
 # ---------- свободный текст: записи, блины, прогресс ----------

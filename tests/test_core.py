@@ -77,6 +77,10 @@ def test_parse_formats():
     assert sets("3х8 +16", bw=True) == [(8, 0, 16)] * 3
     assert sets("3х8х16", bw=True) == [(8, 0, 16)] * 3
     assert sets("12 10 8", bw=True) == [(12, 0, 0), (10, 0, 0), (8, 0, 0)]
+    assert sets("1 10", bw=True) == [(10, 0, 0)]          # подтягивания: 1 подход на 10 раз
+    assert sets("3 12", bw=True) == [(12, 0, 0)] * 3
+    assert sets("1 10 +16", bw=True) == [(10, 0, 16)]
+    assert sets("12 10", bw=True) == [(12, 0, 0), (10, 0, 0)]   # первое число > 10 — это повторы
     # короткий формат «подходы вес повторы»
     assert sets("1 75 10") == [(10, 75, 0)]
     assert sets("3 80 8") == [(8, 80, 0)] * 3
