@@ -7,6 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db import DB  # noqa: E402
+import clock  # noqa: E402
 from exercises import ABS_TRISET, BY_KEY, TEMPLATES  # noqa: E402
 from matcher import Matcher  # noqa: E402
 from parser import ParseError, parse_sets, parse_triset, split_name  # noqa: E402
@@ -135,7 +136,7 @@ def test_db_and_reports(tmp_path):
     e = db.add_entry(w2, "bench", parse_sets("4х10х60"))
     db.add_entry(w2, "pullups", parse_sets("3х8 +16", True))
     rep = reports.workout_report(db, w2)
-    assert "07.11.2026" in rep and "Жим лёжа — 4×10×60 кг (тоннаж 2400 кг)" in rep
+    assert "07.11.2026" in rep and "Жим лёжа — 4×10 по 60 кг (тоннаж 2400 кг)" in rep
     assert "Подтягивания — 3×8 +16 кг" in rep
     assert "02.11.2026" in reports.last_result_text(db, 1, "bench", w2)
     month = reports.period_report(db, 1, "month", today=date(2026, 11, 10))
@@ -203,10 +204,10 @@ def test_nutrition_db(tmp_path):
     for it in nut.parse_food_text("тарелка супа, 2 яблока, творог 200"):
         db.add_food(1, it.key, it.grams, nut.nutrients(it.key, it.grams))
     db.add_water(1, 500)
-    rep = nut.day_report(db.food_day(1, date.today()), db.water_day(1, date.today()), db.get_profile(1), "Сегодня")
+    rep = nut.day_report(db.food_day(1, clock.today()), db.water_day(1, clock.today()), db.get_profile(1), "Сегодня")
     assert "Творог 5% — 200 г · 242 ккал · Б 34" in rep
     assert "Вода: 500 / 2000 мл" in rep and "не хватает" in rep
-    days = db.nutrition_days(1, date.today(), date.today())
+    days = db.nutrition_days(1, clock.today(), clock.today())
     assert len(days) == 1 and days[0]["water"] == 500
 
 
@@ -355,3 +356,23 @@ def test_planner_rules(tmp_path):
     db.set_sleep(1, 5, day=day)
     p2 = planner.build_plan(db, 1, ["back"], today=day)
     assert all(i.sets <= LIB[i.key].sets - 1 or i.sets == 2 for i in p2.items)
+
+
+def test_usability_fixes():
+    assert reports.human_sets([dict(reps=12, weight=16, extra=0)] * 3) == "3 подхода × 12 раз × 16 кг"
+    assert reports.human_sets([dict(reps=1, weight=75, extra=0)]) == "1 подход × 1 раз × 75 кг"
+    assert reports.fmt_sets([dict(reps=10, weight=60, extra=0)] * 4) == "4×10 по 60 кг"
+    assert [(i.key, i.status) for i in nut.parse_food_text("хинкали 5 штук")] == [(None, "none")]   # не угадываем
+    assert nut.looks_food_shaped("хинкали 5 штук") and nut.looks_food_shaped("гречка 200, хинкали 5")
+    assert not nut.looks_food_shaped("жим 3х8х80") and not nut.looks_food_shaped("привет")
+    assert [(i.key, i.grams) for i in nut.parse_food_text("протеин на молоке")] == [("protein", 30), ("milk", 250)]
+
+
+def test_day_ends_at_4am(monkeypatch):
+    from datetime import datetime as real_dt
+    class Fake(real_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return real_dt(2026, 11, 9, 1, 30)
+    monkeypatch.setattr(clock, "datetime", Fake)
+    assert clock.today() == date(2026, 11, 8)       # 01:30 ночи — ещё «вчерашний» день

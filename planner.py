@@ -13,6 +13,8 @@ import random
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
+import clock
+
 from exercises import BY_KEY, EXERCISES, GROUPS, TEMPLATES, rest_for
 from library import JOINT_NAMES, LIB, MAIN_LIFTS, PAIN_WORDS, PATTERN
 from plates import fmt_kg
@@ -115,7 +117,7 @@ def weight_hint(db, user_id: int, key: str) -> str:
 
 
 def build_plan(db, user_id: int, groups: list, seed: int = 0, today: date | None = None) -> Plan:
-    today = today or date.today()
+    today = today or clock.today()
     groups = [g for g in ORDER if g in groups]
     plan = Plan(groups)
     rnd = random.Random(f"{user_id}-{today}-{seed}")

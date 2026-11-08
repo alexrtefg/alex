@@ -11,6 +11,8 @@ import os
 import re
 from datetime import date, datetime, timedelta
 
+import clock
+
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BufferedInputFile, CallbackQuery, FSInputFile, KeyboardButton, Message,
@@ -20,6 +22,7 @@ from dotenv import load_dotenv
 
 import reports
 from db import DB
+from exercises import KETTLEBELLS
 from exercises import ABS_EXERCISES, ABS_TRISET, BY_KEY, EXERCISES, GROUPS, REST_LIGHT, TEMPLATES, rest_for
 from export import export_xlsx
 from matcher import Matcher
@@ -50,6 +53,7 @@ pending_pick: dict[int, dict] = {}   # выбор упражнения из ва
 pending_text: dict[int, str] = {}    # запись, присланная до начала тренировки
 pending_voice: dict[int, tuple] = {}  # голосовое, которое можно сделать сигналом таймера
 selected: dict[int, str] = {}         # упражнение, выбранное в меню: дальше можно вводить только цифры
+pending_numbers: dict[int, str] = {}  # цифры, присланные до выбора упражнения: запишем после выбора
 
 
 def get_signal(user_id: int):
@@ -142,7 +146,7 @@ HELP = (
 
 
 def today_str() -> str:
-    return date.today().strftime("%d.%m.%Y")
+    return clock.today().strftime("%d.%m.%Y")
 
 
 WT_SHORT = {"A": "А", "B": "Б", "C": "своя"}
@@ -247,8 +251,10 @@ def selected_text(user_id: int, key: str, workout_id: int | None) -> str:
             f"Вводи цифры: {example}\nОтдых после подхода: {mmss(rest_for(key))}")
 
 
-def choose_type_kb(suggested: str):
+def choose_type_kb(suggested: str, resume_id: int | None = None):
     kb = InlineKeyboardBuilder()
+    if resume_id:
+        kb.button(text="↩️ Продолжить сегодняшнюю тренировку", callback_data=f"wtr:{resume_id}")
     for t in ([suggested] + [x for x in ("A", "B") if x != suggested]):
         mark = "✅ " if t == suggested else ""
         kb.button(text=mark + TEMPLATES[t]["title"].replace("Тренировка ", ""), callback_data=f"wt:{t}")
@@ -291,12 +297,12 @@ async def cmd_export(message: Message):
 
 async def send_export(message: Message, user_id: int):
     data = export_xlsx(db, user_id)
-    await message.answer_document(BufferedInputFile(data, filename=f"дневник_{date.today():%Y-%m-%d}.xlsx"))
+    await message.answer_document(BufferedInputFile(data, filename=f"дневник_{clock.today():%Y-%m-%d}.xlsx"))
 
 
 @router.message(Command("backup"))
 async def cmd_backup(message: Message):
-    await message.answer_document(FSInputFile(DB_PATH, filename=f"gym_backup_{date.today():%Y-%m-%d}.db"),
+    await message.answer_document(FSInputFile(DB_PATH, filename=f"gym_backup_{clock.today():%Y-%m-%d}.db"),
                                   caption="Резервная копия базы. Сохрани файл в надёжное место.")
 
 
@@ -310,7 +316,7 @@ async def start_workout(message: Message):
 
 async def ask_workout_type(message: Message, user_id: int):
     active = db.active_workout(user_id)
-    if active and active["day"] == date.today().isoformat():
+    if active and active["day"] == clock.today().isoformat():
         await message.answer("Тренировка уже идёт, просто записывай упражнения.\n\n" +
                              reports.workout_report(db, active["id"]))
         return
@@ -320,10 +326,32 @@ async def ask_workout_type(message: Message, user_id: int):
     last = db.last_workout(user_id)
     suggested = "B" if last and last["wtype"] == "A" else "A"
     text = f"📅 {today_str()}\nКакая сегодня тренировка?"
-    if last:
-        days = (date.today() - date.fromisoformat(last["day"])).days
+    resume = last if last and last["day"] == clock.today().isoformat() else None
+    if last and not resume:
+        days = (clock.today() - date.fromisoformat(last["day"])).days
         text += f"\nПрошлая: {reports.ddmmyyyy(last['day'])} ({WT_SHORT.get(last['wtype'], '')}), прошло {days} дн."
-    await message.answer(text, reply_markup=choose_type_kb(suggested))
+    if resume:
+        text += "\nСегодняшняя тренировка уже завершена — можно продолжить её или начать новую."
+    await message.answer(text, reply_markup=choose_type_kb(suggested, resume["id"] if resume else None))
+
+
+@router.callback_query(F.data.startswith("prog:"))
+async def on_progress(cb: CallbackQuery):
+    await cb.answer()
+    await cb.message.answer(reports.exercise_report(db, cb.from_user.id, cb.data.split(":")[1]))
+
+
+@router.callback_query(F.data.startswith("wtr:"))
+async def on_resume(cb: CallbackQuery):
+    wid = int(cb.data.split(":")[1])
+    w = db.get_workout(wid)
+    await cb.answer()
+    if not w or w["user_id"] != cb.from_user.id:
+        return
+    db.conn.execute("UPDATE workouts SET finished_at=NULL WHERE id=?", (wid,))
+    db.conn.commit()
+    await cb.message.answer("↩️ Продолжаем сегодняшнюю тренировку.\n\n" + reports.workout_report(db, wid))
+    await ask_next_exercise(cb.message, cb.from_user.id, "🏋️ Какое упражнение?")
 
 
 @router.callback_query(F.data.startswith("wt:"))
@@ -331,7 +359,7 @@ async def on_workout_type(cb: CallbackQuery):
     wtype = cb.data.split(":")[1]
     user_id = cb.from_user.id
     active = db.active_workout(user_id)
-    if active and active["day"] == date.today().isoformat():
+    if active and active["day"] == clock.today().isoformat():
         await cb.answer("Тренировка уже идёт")
         return
     prev_same = db.last_workout(user_id, wtype)
@@ -346,6 +374,7 @@ async def on_workout_type(cb: CallbackQuery):
     await cb.message.edit_text(text, reply_markup=kb.as_markup())
     await cb.answer()
     if user_id in pending_text:
+        await ask_wellbeing(cb.message)
         await handle_entry(cb.message, user_id, pending_text.pop(user_id), wid, wtype)
     elif user_id in selected:
         await cb.message.answer(selected_text(user_id, selected[user_id], wid))
@@ -484,12 +513,39 @@ async def on_pick(cb: CallbackQuery):
     await save_entry(cb.message, cb.from_user.id, p["workout_id"], key, p["numbers"], p["raw"])
 
 
+KB_EXERCISES = {"curl_kb", "kb_press", "kb_row", "kb_sumo", "kb_swing", "goblet_squat", "calf_standing"}
+
+
+def fix_order(user_id: int, key: str, numbers: str) -> tuple[str, str]:
+    """«3 12 16» — подходы, вес, повторы. Если похоже, что вес и повторы перепутаны местами, меняем и говорим об этом.
+
+    Признаки: у гири вес бывает только 16/24/32; или прошлый рабочий вес ближе к последнему числу.
+    """
+    m = re.fullmatch(r"(\d+) (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)", numbers.strip())
+    if not m or BY_KEY[key].bodyweight:
+        return numbers, ""
+    sets, w, r = m.group(1), float(m.group(2)), float(m.group(3))
+    if not r.is_integer() and w.is_integer():
+        swap = True                                     # «3 10 57.5»: дробное — это вес
+    elif key in KB_EXERCISES:
+        swap = r in KETTLEBELLS and w not in KETTLEBELLS
+    else:
+        hist = db.exercise_history(user_id, key)
+        prev = hist[-1]["weight"] if hist else None
+        swap = bool(prev) and w <= 30 and abs(r - prev) < abs(w - prev)
+    if not swap:
+        return numbers, ""
+    return (f"{sets} {fmt_kg(r).replace(',', '.')} {int(w)}",
+            f"ℹ️ Понял как {fmt_kg(r)} кг на {int(w)} раз. Формат: подходы, вес, повторы.")
+
+
 async def save_entry(message: Message, user_id: int, workout_id: int, key: str, numbers: str, raw: str):
     ex = BY_KEY[key]
     selected[user_id] = key
     if not numbers:
         await message.answer(selected_text(user_id, key, workout_id))
         return
+    numbers, swap_note = fix_order(user_id, key, numbers)
     try:
         rows = parse_sets(numbers, bodyweight=ex.bodyweight)
     except ParseError as e:
@@ -500,9 +556,11 @@ async def save_entry(message: Message, user_id: int, workout_id: int, key: str, 
     entry_id = db.add_entry(workout_id, key, rows, raw, body=body)
     saved = [dict(reps=r.reps, weight=r.weight, extra=r.extra, body=body) for r in rows]
     t = reports.tonnage(saved)
-    text = f"✅ {ex.name}: {reports.fmt_sets(saved)}"
+    text = f"✅ {ex.name}: {reports.human_sets(saved)}"
     if t:
         text += f" (тоннаж {fmt_kg(t)} кг)"
+    if swap_note:
+        text += f"\n{swap_note}"
     last = reports.last_result_text(db, user_id, key, workout_id)
     if last:
         text += f"\n↗️ {last}"
@@ -542,7 +600,7 @@ async def on_text(message: Message):
 
     if re.fullmatch(r"[\d\s.,+хx*×]+", low) and re.search(r"\d", low):   # только цифры: 1 75 10
         active = db.active_workout(user_id)
-        if not active or active["day"] != date.today().isoformat():
+        if not active or active["day"] != clock.today().isoformat():
             pending_text[user_id] = text
             await message.answer("Сначала выбери тренировку, и я сразу запишу это.")
             await ask_workout_type(message, user_id)
@@ -585,22 +643,42 @@ async def on_text(message: Message):
     m = re.fullmatch(r"вес\s*(\d+(?:[.,]\d+)?)\s*(кг)?", low)
     if m:
         w = float(m.group(1).replace(",", "."))
-        if not db.get_profile(user_id):
-            await message.answer("Сначала заполни профиль: профиль 85 180 м 50")
+        if not 30 <= w <= 250:
+            await message.answer("Проверь вес, например: вес 76,5")
             return
         prev = db.weight_history(user_id)
         db.log_weight(user_id, w)
         text_w = f"⚖️ Вес {fmt_kg(w)} кг записан."
         if prev:
-            text_w += f" Прошлый раз ({reports.ddmmyyyy(prev[-1]['day'])}): {fmt_kg(prev[-1]['weight'])} кг."
-        await message.answer(text_w + "\nНорма пересчитана: " +
-                             f"{nut.targets(db.get_profile(user_id))['kcal']:.0f} ккал, "
-                             f"белок {nut.targets(db.get_profile(user_id))['protein']:.0f} г.")
+            d = w - prev[-1]["weight"]
+            text_w += (f" Прошлый раз ({reports.ddmmyyyy(prev[-1]['day'])}): {fmt_kg(prev[-1]['weight'])} кг "
+                       f"({'+' if d >= 0 else '−'}{fmt_kg(abs(round(d, 1)))}).")
+        p = db.get_profile(user_id)
+        if p:
+            t = nut.targets(p)
+            text_w += f"\nНорма пересчитана: {t['kcal']:.0f} ккал, белок {t['protein']:.0f} г."
+        else:
+            text_w += "\nЧтобы бот считал норму питания, заполни профиль: 76 175 м 50 (вес, рост, пол, возраст)."
+        await message.answer(text_w)
         return
 
     for prefix in ("прогресс", "отчет", "рекорд"):
         if low.startswith(prefix):
             name = low.removeprefix(prefix).strip()
+            if not name:
+                keys = [r["exercise_key"] for r in db.conn.execute(
+                    "SELECT e.exercise_key, COUNT(*) c FROM entries e JOIN workouts w ON w.id=e.workout_id "
+                    "WHERE w.user_id=? GROUP BY e.exercise_key ORDER BY c DESC LIMIT 20", (user_id,)).fetchall()
+                        if r["exercise_key"] in BY_KEY]
+                if not keys:
+                    await message.answer("Пока нет записей упражнений.")
+                    return
+                kb = InlineKeyboardBuilder()
+                for k in keys:
+                    kb.button(text=BY_KEY[k].name, callback_data=f"prog:{k}")
+                kb.adjust(2)
+                await message.answer("📈 Прогресс какого упражнения показать?", reply_markup=kb.as_markup())
+                return
             res = matcher.match(name)
             if res.status == "ok":
                 await message.answer(reports.exercise_report(db, user_id, res.key))
@@ -614,7 +692,7 @@ async def on_text(message: Message):
     name, _ = split_name(text)
     ex_res = matcher.match(name) if name else None
     if not is_triset and not (ex_res and ex_res.status == "ok"):
-        if nut.looks_like_food(text):
+        if nut.looks_like_food(text) or nut.looks_food_shaped(text):
             await handle_food(message, user_id, text)
             return
         if not ex_res or ex_res.status == "none" or not re.search(r"\d", text):
@@ -624,7 +702,7 @@ async def on_text(message: Message):
             return
 
     active = db.active_workout(user_id)
-    if not active or active["day"] != date.today().isoformat():
+    if not active or active["day"] != clock.today().isoformat():
         pending_text[user_id] = text
         await message.answer("Сначала выбери тренировку, и я сразу запишу это.")
         await ask_workout_type(message, user_id)
@@ -647,7 +725,8 @@ async def handle_entry(message: Message, user_id: int, text: str, workout_id: in
     if not name:
         key = selected.get(user_id)
         if not key:
-            await ask_next_exercise(message, user_id, "Сначала выбери упражнение, потом вводи цифры (например 1 75 10):")
+            pending_numbers[user_id] = numbers
+            await ask_next_exercise(message, user_id, f"Какое это упражнение? Нажми — и я запишу «{numbers}»:")
             return
         await save_entry(message, user_id, workout_id, key, numbers, BY_KEY[key].name)
         return
@@ -685,8 +764,8 @@ def nut_undo_kb(food_ids: list[int], water_ids: list[int]):
 
 
 def day_summary(user_id: int) -> str:
-    rows = db.food_day(user_id, date.today())
-    water = db.water_day(user_id, date.today())
+    rows = db.food_day(user_id, clock.today())
+    water = db.water_day(user_id, clock.today())
     kcal = sum(r["kcal"] for r in rows)
     protein = sum(r["protein"] for r in rows)
     p = db.get_profile(user_id)
@@ -751,7 +830,7 @@ async def add_water_and_reply(message: Message, user_id: int, ml: int):
     wid = db.add_water(user_id, ml)
     p = db.get_profile(user_id)
     goal = nut.targets(p)["water"] if p else nut.WATER_GOAL_ML
-    total = db.water_day(user_id, date.today())
+    total = db.water_day(user_id, clock.today())
     text = f"💧 +{ml} мл · сегодня {total:.0f} / {goal:.0f} мл {nut.bar(total, goal)}"
     if total >= goal:
         text += "\n✅ Норма воды на сегодня выполнена!"
@@ -775,7 +854,7 @@ def food_day_text(user_id: int, day: date, title: str) -> str:
 @router.message(Command("food"))
 @router.message(btn(BTN_FOOD))
 async def food_today(message: Message):
-    await message.answer(food_day_text(message.from_user.id, date.today(), "Питание за"),
+    await message.answer(food_day_text(message.from_user.id, clock.today(), "Питание за"),
                          reply_markup=food_menu_kb())
 
 
@@ -785,12 +864,12 @@ async def on_nut(cb: CallbackQuery):
     user_id = cb.from_user.id
     await cb.answer()
     if kind == "yesterday":
-        await cb.message.answer(food_day_text(user_id, date.today() - timedelta(days=1), "Питание за"))
+        await cb.message.answer(food_day_text(user_id, clock.today() - timedelta(days=1), "Питание за"))
     elif kind == "profile":
         p = db.get_profile(user_id)
         await cb.message.answer(nut.profile_text(p) if p else "Профиль не заполнен. Пример: профиль 85 180 м 50")
     elif kind == "week":
-        end = date.today()
+        end = clock.today()
         days = db.nutrition_days(user_id, end - timedelta(days=6), end)
         if not days:
             await cb.message.answer("За неделю записей о питании нет.")
@@ -996,7 +1075,7 @@ async def on_signal_choice(cb: CallbackQuery):
 async def exercises_button(message: Message):
     user_id = message.from_user.id
     active = db.active_workout(user_id)
-    if not active or active["day"] != date.today().isoformat():
+    if not active or active["day"] != clock.today().isoformat():
         await ask_workout_type(message, user_id)
         return
     await ask_next_exercise(message, user_id, "🏋️ Выбери упражнение:")
@@ -1009,10 +1088,14 @@ async def on_select(cb: CallbackQuery):
     await cb.answer(BY_KEY[key].name)
     selected[user_id] = key
     active = db.active_workout(user_id)
-    if not active or active["day"] != date.today().isoformat():
+    if not active or active["day"] != clock.today().isoformat():
         await ask_workout_type(cb.message, user_id)
         return
-    await cb.message.answer(selected_text(user_id, key, active["id"]))
+    nums = pending_numbers.pop(user_id, None)
+    if nums:
+        await save_entry(cb.message, user_id, active["id"], key, nums, BY_KEY[key].name)
+    else:
+        await cb.message.answer(selected_text(user_id, key, active["id"]))
 
 
 @router.callback_query(F.data == "selall")
@@ -1103,11 +1186,11 @@ async def on_wellbeing(cb: CallbackQuery):
 
 async def save_pain(message: Message, user_id: int, what: str):
     active = db.active_workout(user_id)
-    if active and active["day"] == date.today().isoformat():
+    if active and active["day"] == clock.today().isoformat():
         db.add_pain(active["id"], what)
     else:
-        prev = db.get_setting(user_id, f"pain:{date.today().isoformat()}")
-        db.set_setting(user_id, f"pain:{date.today().isoformat()}", f"{prev}; {what}" if prev else what)
+        prev = db.get_setting(user_id, f"pain:{clock.today().isoformat()}")
+        db.set_setting(user_id, f"pain:{clock.today().isoformat()}", f"{prev}; {what}" if prev else what)
     await message.answer(f"🤕 Записал: болит {what}.\n"
                          "Не делай упражнения через боль: убери или замени то, что её вызывает, снизь вес. "
                          "Если боль острая или не проходит несколько дней — к врачу.")
@@ -1124,7 +1207,7 @@ async def handle_measures(message: Message, user_id: int, low: str):
     lines = ["📏 Замеры записаны:"]
     for part, v in values.items():
         line = f"• {measures.PARTS[part]}: {fmt_kg(v)} см"
-        prev = [r for r in before[part] if r["day"] != date.today().isoformat()]
+        prev = [r for r in before[part] if r["day"] != clock.today().isoformat()]
         if prev:
             d = v - prev[-1]["value"]
             line += f" ({'+' if d >= 0 else '−'}{fmt_kg(abs(round(d, 1)))} с {reports.ddmmyyyy(prev[-1]['day'])})"
@@ -1230,7 +1313,7 @@ async def on_plan(cb: CallbackQuery):
         db.set_setting(user_id, "plan_items", json.dumps([[i.key, i.sets, i.reps] for i in plan.items],
                                                          ensure_ascii=False))
         active = db.active_workout(user_id)
-        if active and active["day"] == date.today().isoformat():
+        if active and active["day"] == clock.today().isoformat():
             db.conn.execute("UPDATE workouts SET wtype='C' WHERE id=?", (active["id"],))
             db.conn.commit()
         else:
@@ -1266,7 +1349,7 @@ async def sleep_button(message: Message):
     for h in (5.5, 6.5, 7.5, 8.5):
         kb.button(text=f"{h:g} ч".replace(".", ","), callback_data=f"sleep:{h}")
     kb.adjust(5, 4)
-    cur = db.get_sleep(message.from_user.id, date.today())
+    cur = db.get_sleep(message.from_user.id, clock.today())
     head = f"Сейчас записано: {summary.fmt_hours(cur)}\n" if cur else ""
     await message.answer(head + "😴 Сколько спал этой ночью? Или напиши: сон 23:30-7:00",
                          reply_markup=kb.as_markup())
@@ -1297,7 +1380,7 @@ async def on_summary(cb: CallbackQuery):
     if cb.data == "sum:week":
         await cb.message.answer(summary.week_summary(db, cb.from_user.id))
     else:
-        await cb.message.answer(summary.day_summary(db, cb.from_user.id, date.today() - timedelta(days=1)))
+        await cb.message.answer(summary.day_summary(db, cb.from_user.id, clock.today() - timedelta(days=1)))
 
 
 # Чужие сообщения (если указан OWNER_ID): не молчим, а объясняем и пишем в журнал.

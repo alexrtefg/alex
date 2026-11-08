@@ -2,6 +2,8 @@
 import sqlite3
 from datetime import date, datetime
 
+import clock
+
 from parser import SetRow
 
 SCHEMA = """
@@ -138,7 +140,7 @@ class DB:
         return self.conn.execute(sql, args).fetchone()
 
     def start_workout(self, user_id: int, wtype: str, day: date | None = None) -> int:
-        day = day or date.today()
+        day = day or clock.today()
         cur = self.conn.execute(
             "INSERT INTO workouts(user_id, day, wtype, started_at) VALUES (?,?,?,?)",
             (user_id, day.isoformat(), wtype, now()))
@@ -237,7 +239,7 @@ class DB:
         self.log_weight(user_id, weight)
 
     def log_weight(self, user_id: int, weight: float, day: date | None = None):
-        day = (day or date.today()).isoformat()
+        day = (day or clock.today()).isoformat()
         self.conn.execute("DELETE FROM weight_log WHERE user_id=? AND day=?", (user_id, day))
         self.conn.execute("INSERT INTO weight_log(user_id, day, weight) VALUES (?,?,?)", (user_id, day, weight))
         self.conn.execute("UPDATE profile SET weight=? WHERE user_id=?", (weight, user_id))
@@ -268,7 +270,7 @@ class DB:
         cur = self.conn.execute(
             "INSERT INTO food_log(user_id, day, food_key, grams, kcal, protein, fat, carbs, raw_text, created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (user_id, (day or date.today()).isoformat(), food_key, grams, n["kcal"], n["protein"], n["fat"],
+            (user_id, (day or clock.today()).isoformat(), food_key, grams, n["kcal"], n["protein"], n["fat"],
              n["carbs"], raw, now()))
         self.conn.commit()
         return cur.lastrowid
@@ -284,7 +286,7 @@ class DB:
 
     def add_water(self, user_id: int, ml: float, day: date | None = None) -> int:
         cur = self.conn.execute("INSERT INTO water_log(user_id, day, ml, created_at) VALUES (?,?,?,?)",
-                                (user_id, (day or date.today()).isoformat(), ml, now()))
+                                (user_id, (day or clock.today()).isoformat(), ml, now()))
         self.conn.commit()
         return cur.lastrowid
 
@@ -321,7 +323,7 @@ class DB:
     # --- сон ---
     def set_sleep(self, user_id: int, hours: float, day: date | None = None):
         self.conn.execute("INSERT OR REPLACE INTO sleep_log(user_id, day, hours) VALUES (?,?,?)",
-                          (user_id, (day or date.today()).isoformat(), hours))
+                          (user_id, (day or clock.today()).isoformat(), hours))
         self.conn.commit()
 
     def get_sleep(self, user_id: int, day: date) -> float | None:
@@ -358,7 +360,7 @@ class DB:
 
     # --- вес тела на дату и подтягивания/брусья в тоннаже ---
     def body_weight_on(self, user_id: int, day: date | None = None) -> float | None:
-        day = (day or date.today()).isoformat()
+        day = (day or clock.today()).isoformat()
         row = self.conn.execute("SELECT weight FROM weight_log WHERE user_id=? AND day<=? ORDER BY day DESC LIMIT 1",
                                 (user_id, day)).fetchone()
         if row:
@@ -380,7 +382,7 @@ class DB:
 
     # --- замеры тела ---
     def add_measure(self, user_id: int, part: str, value: float, day: date | None = None):
-        day = (day or date.today()).isoformat()
+        day = (day or clock.today()).isoformat()
         self.conn.execute("DELETE FROM measurements WHERE user_id=? AND day=? AND part=?", (user_id, day, part))
         self.conn.execute("INSERT INTO measurements(user_id, day, part, value) VALUES (?,?,?,?)",
                           (user_id, day, part, value))

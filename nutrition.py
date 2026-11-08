@@ -15,6 +15,7 @@ STOP_WORDS = {"съел", "съела", "поел", "поела", "ел", "ел�
               "перекус"}
 FOOD_PREFIXES = ("еда", "съел", "съела", "поел", "поела", "выпил", "выпила", "завтрак", "обед", "ужин", "перекус")
 
+GUESS_MIN = 75            # ниже этой похожести продукт не угадываем
 ACTIVITY = 1.375          # тренировки 1–2 раза в неделю + обычная бытовая активность
 GOALS = {"maintain": ("поддержание веса", 1.0), "loss": ("снижение веса", 0.85), "gain": ("набор массы", 1.10)}
 PROTEIN_PER_KG = 1.6      # г белка на кг веса: для сохранения и роста мышц при силовых тренировках
@@ -129,8 +130,8 @@ def parse_item(segment: str) -> FoodItem:
 
     res = food_matcher.match(name_s)
     item.score = res.score
-    if res.status == "none":
-        item.status = "none"
+    if res.status == "none" or (res.status == "ask" and res.score < GUESS_MIN):
+        item.status = "none"          # не угадываем наугад: лучше честно сказать «не знаю продукт»
         return item
     if res.status == "ask":
         item.status, item.key = "guess", res.options[0][0]
@@ -166,6 +167,10 @@ def parse_food_text(text: str) -> list[FoodItem]:
                 items.extend(parts)
                 continue
         items.append(whole)
+        # «протеин на молоке» — порошок + стакан молока (250 мл, обычный шейкер)
+        if "на молоке" in seg and whole.key in ("protein", "gainer", "bcaa"):
+            milk = FoodItem(raw="молоко", key="milk", grams=250)
+            items.append(milk)
     return items
 
 
@@ -173,6 +178,18 @@ def nutrients(food_key: str, grams: float) -> dict:
     f = FOOD_BY_KEY[food_key]
     k = grams / 100
     return dict(kcal=f.kcal * k, protein=f.protein * k, fat=f.fat * k, carbs=f.carbs * k)
+
+
+def looks_food_shaped(text: str) -> bool:
+    """Похоже на еду по форме: есть единицы (шт, г, тарелка…) или слова «съел/обед», или известный продукт в списке."""
+    low = text.lower().replace("ё", "е")
+    if re.search(r"\d\s*[хx*×]\s*\d", low):
+        return False
+    tokens = set(re.sub(r"[^\w\s]", " ", low).split())
+    if tokens & (set(UNIT_CANON) | ABSOLUTE_UNITS | set(FOOD_PREFIXES)):
+        return True
+    items = parse_food_text(text)
+    return len(items) > 1 and any(i.status == "ok" for i in items)
 
 
 def looks_like_food(text: str) -> bool:

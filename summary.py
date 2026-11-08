@@ -2,6 +2,8 @@
 import re
 from datetime import date, datetime, timedelta
 
+import clock
+
 import nutrition as nut
 import reports
 from db import DB
@@ -51,7 +53,7 @@ def _protein_tip(gap: float) -> str:
 
 
 def day_summary(db: DB, user_id: int, day: date | None = None, now: datetime | None = None) -> str:
-    day = day or date.today()
+    day = day or clock.today()
     now = now or datetime.now()
     p = db.get_profile(user_id)
     t = nut.targets(p) if p else None
@@ -204,7 +206,7 @@ def day_summary(db: DB, user_id: int, day: date | None = None, now: datetime | N
 
 
 def week_summary(db: DB, user_id: int, end: date | None = None) -> str:
-    end = end or date.today()
+    end = end or clock.today()
     start = end - timedelta(days=6)
     p = db.get_profile(user_id)
     t = nut.targets(p) if p else None

@@ -2,6 +2,8 @@
 from collections import OrderedDict
 from datetime import date, timedelta
 
+import clock
+
 from db import DB
 from exercises import BY_KEY, GROUPS, TEMPLATES
 from plates import fmt_kg
@@ -44,7 +46,10 @@ def e1rm(weight: float, reps: int) -> float:
 
 
 def fmt_sets(rows) -> str:
-    """[(reps, weight, extra)] -> «4×10×60 кг» или «60×10, 60×8» или «3×12 (свой вес)»."""
+    """Подходы коротко: «4×10 по 60 кг», «60 кг×10, 60 кг×8», «3×12 (свой вес)», «3×8 +16 кг».
+
+    Подходы×повторы, потом вес — так не путается с вводом «подходы вес повторы».
+    """
     def one(r):
         w = r["weight"] + r["extra"]
         return (r["reps"], r["weight"], r["extra"], w)
@@ -55,7 +60,7 @@ def fmt_sets(rows) -> str:
     if same:
         s = f"{len(items)}×{reps}"
         if weight:
-            s += f"×{fmt_kg(weight)} кг"
+            s += f" по {fmt_kg(weight)} кг"
         if extra:
             s += f" +{fmt_kg(extra)} кг"
         if not weight and not extra:
@@ -64,13 +69,36 @@ def fmt_sets(rows) -> str:
     parts = []
     for reps, weight, extra, _ in items:
         if weight:
-            p = f"{fmt_kg(weight)}×{reps}"
+            p = f"{fmt_kg(weight)} кг×{reps}"
         else:
-            p = str(reps)
+            p = f"{reps} раз"
         if extra:
             p += f"(+{fmt_kg(extra)})"
         parts.append(p)
     return ", ".join(parts)
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    n = abs(n) % 100
+    if 11 <= n <= 14:
+        return many
+    return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
+
+
+def human_sets(rows) -> str:
+    """«3 подхода × 12 раз × 16 кг» — понятная расшифровка записи (если подходы одинаковые)."""
+    first = rows[0]
+    if not all((r["reps"], r["weight"], r["extra"]) == (first["reps"], first["weight"], first["extra"]) for r in rows):
+        return fmt_sets(rows)
+    n, reps = len(rows), first["reps"]
+    s = f"{n} {plural(n, 'подход', 'подхода', 'подходов')} × {reps} {plural(reps, 'раз', 'раза', 'раз')}"
+    if first["weight"]:
+        s += f" × {fmt_kg(first['weight'])} кг"
+    if first["extra"]:
+        s += f" +{fmt_kg(first['extra'])} кг"
+    if not first["weight"] and not first["extra"]:
+        s += " (свой вес)"
+    return s
 
 
 def group_by_exercise(rows) -> "OrderedDict[str, list]":
@@ -120,7 +148,7 @@ def last_result_text(db: DB, user_id: int, key: str, current_workout: int) -> st
 
 
 def period_bounds(kind: str, today: date | None = None) -> tuple[date, date, str]:
-    today = today or date.today()
+    today = today or clock.today()
     if kind == "week":
         start = today - timedelta(days=today.weekday())
         return start, start + timedelta(days=6), f"Неделя {start:%d.%m}–{start + timedelta(days=6):%d.%m.%Y}"
@@ -212,7 +240,7 @@ def exercise_report(db: DB, user_id: int, key: str, last_n: int = 10) -> str:
         line = f"{ddmmyyyy(day)}: {fmt_sets(rows)}"
         if weighted:
             best = max(e1rm(r["weight"] + r["extra"], r["reps"]) for r in rows)
-            line += f" · 1ПМ≈{best:.0f}"
+            line += f" · 1ПМ≈{fmt_kg(round(best))}"
         lines.append(line)
     lines.append("")
     if weighted:
@@ -220,7 +248,7 @@ def exercise_report(db: DB, user_id: int, key: str, last_n: int = 10) -> str:
         lines.append(f"🏆 Рекорд веса: {fmt_kg(top['weight'] + top['extra'])} кг × {top['reps']} "
                      f"({ddmmyyyy(top['day'])})")
         best_e = max(hist, key=lambda r: e1rm(r["weight"] + r["extra"], r["reps"]))
-        lines.append(f"🏆 Лучший расчётный 1ПМ: {e1rm(best_e['weight'] + best_e['extra'], best_e['reps']):.1f} кг "
+        lines.append(f"🏆 Лучший расчётный 1ПМ: {fmt_kg(round(e1rm(best_e['weight'] + best_e['extra'], best_e['reps']), 1))} кг "
                      f"({ddmmyyyy(best_e['day'])})")
     else:
         top = max(hist, key=lambda r: r["reps"])
