@@ -249,3 +249,39 @@ def test_glass_is_200():
     assert nut.parse_food_text("стакан воды")[0].grams == 200
     assert nut.parse_food_text("вода")[0].grams == 200
     assert nut.parse_food_text("стакан кефира")[0].grams == 200
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("скумбрия с картошкой", [("mackerel", 150), ("potato_boiled", 200)]),
+    ("рыба", [("fish", 150)]),
+    ("цикорий", [("chicory", 200)]),
+    ("кофе с молоком", [("coffee_milk", 250)]),
+    ("кофе с сахаром", [("coffee_sugar", 200)]),
+    ("греча", [("buckwheat", 200)]),
+    ("рисовая каша", [("rice_porridge", 250)]),
+    ("манная каша", [("semolina", 250)]),
+    ("овсяная каша", [("oatmeal_water", 250)]),
+    ("геркулес", [("oatmeal_water", 250)]),
+    ("каша с молоком", [("porridge_milk", 250)]),
+    ("бутерброд с маслом и сыром", [("sandw_butter_cheese", 60)]),
+    ("2 бутерброда с маслом и сыром", [("sandw_butter_cheese", 120)]),
+    ("бутерброд с копченой колбасой", [("sandw_smoked", 55)]),
+    ("бутерброд с колбасой", [("sandw_sausage", 60)]),
+    ("стакан гейнера", [("gainer", 60)]),
+    ("протеиновый коктейль", [("protein", 30)]),
+    ("всаа стакан", [("bcaa", 7)]),
+    ("масса творожная", [("curd_mass", 100)]),
+    ("творог 18", [("cottage18", 200)]),
+    ("творог 9 200", [("cottage9", 200)]),
+    ("творог 200", [("cottage5", 200)]),
+    ("курица с рисом", [("chicken_breast", 150), ("rice", 200)]),
+])
+def test_food_more(text, expected):
+    assert [(i.key, i.grams) for i in nut.parse_food_text(text)] == expected
+
+
+def test_profile_without_word():
+    assert nut.looks_like_profile("76 175 м 50")
+    assert nut.parse_profile("76 175 м 50") == dict(weight=76, height=175, sex="m", age=50, goal="maintain")
+    assert nut.looks_like_profile("профиль 76 175 м 50")
+    assert not nut.looks_like_profile("3 80 8") and not nut.looks_like_profile("2 яблока")

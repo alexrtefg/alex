@@ -30,6 +30,7 @@ class FoodItem:
     grams: float = 0
     status: str = "ok"        # ok | guess | none
     note: str = ""
+    score: float = 0
 
     @property
     def food(self):
@@ -53,12 +54,29 @@ def _prepare(text: str) -> str:
     return s
 
 
+# Названия продуктов, внутри которых есть «и» (их нельзя резать по «и»).
+_ALIASES_WITH_AND = sorted((a for a in food_matcher.alias_to_key if " и " in a), key=len, reverse=True)
+
+
 def split_items(text: str) -> list[str]:
     s = _prepare(text)
     for p in FOOD_PREFIXES:
         s = re.sub(rf"^\s*{p}\b[:\s]*", "", s)
+    for a in _ALIASES_WITH_AND:                       # «бутерброд с маслом и сыром» — один продукт
+        s = s.replace(a, a.replace(" и ", " и_ "))
+    s = re.sub(r"(бутерброд\w*\s+с\s+\w+)\s+и\s+(?=[а-я])", r"\1 и_ ", s)   # «2 бутерброда с маслом и сыром»
+    # «творог 18», «творог 9%» — это жирность, а не количество
+    s = re.sub(r"\b(творог\w*)\s+(5|9|18)\s*(%|процент\w*)?(?=[\s,;]|$)", r"\1_\2", s)
     parts = re.split(r"[,;\n]+|\s\+\s|\sи\s", s)
-    return [p.strip() for p in parts if p.strip()]
+    return [p.replace(" и_ ", " и ").strip() for p in parts if p.strip()]
+
+
+def _is_exact(segment: str) -> bool:
+    """Есть ли фраза целиком (без цифр и единиц) в справочнике, например «кофе с молоком»."""
+    words = [t for t in re.sub(r"[^\w\s.]", " ", segment.lower().replace("ё", "е")).split()
+             if _num(t) is None and t not in UNIT_CANON and t not in ABSOLUTE_UNITS and t not in SIZES
+             and t not in STOP_WORDS]
+    return " ".join(words) in food_matcher.alias_to_key
 
 
 def parse_item(segment: str) -> FoodItem:
@@ -110,6 +128,7 @@ def parse_item(segment: str) -> FoodItem:
         return item
 
     res = food_matcher.match(name_s)
+    item.score = res.score
     if res.status == "none":
         item.status = "none"
         return item
@@ -137,7 +156,17 @@ def parse_item(segment: str) -> FoodItem:
 
 
 def parse_food_text(text: str) -> list[FoodItem]:
-    return [parse_item(s) for s in split_items(text)]
+    items = []
+    for seg in split_items(text):
+        # «скумбрия с картошкой» -> скумбрия + картошка; но «кофе с молоком» остаётся целым
+        whole = parse_item(seg)
+        if " с " in seg and not _is_exact(seg) and not (whole.status == "ok" and whole.score >= 90):
+            parts = [parse_item(p) for p in seg.split(" с ") if p.strip()]
+            if len(parts) > 1 and all(p.status == "ok" for p in parts):
+                items.extend(parts)
+                continue
+        items.append(whole)
+    return items
 
 
 def nutrients(food_key: str, grams: float) -> dict:
@@ -161,7 +190,9 @@ def looks_like_food(text: str) -> bool:
 def parse_profile(text: str) -> dict:
     """«профиль 85 180 м 50 набор» -> {weight, height, sex, age, goal}."""
     s = normalize(_prepare(text)).replace(",", " ")
-    tokens = s.split()[1:]
+    tokens = s.split()
+    if tokens and tokens[0] == "профиль":
+        tokens = tokens[1:]
     nums = [float(t) for t in tokens if re.fullmatch(r"\d+(\.\d+)?", t)]
     if len(nums) < 3:
         raise ValueError("Формат: профиль ВЕС РОСТ ПОЛ ВОЗРАСТ [цель]\nПример: профиль 85 180 м 50")
@@ -175,6 +206,19 @@ def parse_profile(text: str) -> dict:
     elif any(t.startswith(("похуд", "сушк", "сниж", "сброс")) for t in tokens):
         goal = "loss"
     return dict(weight=weight, height=height, sex=sex, age=int(age), goal=goal)
+
+
+SEX_WORDS = {"м", "муж", "мужчина", "мужской", "ж", "жен", "женщина", "женский"}
+PROFILE_WORDS = SEX_WORDS | {"профиль", "кг", "см", "лет", "год", "года", "вес", "рост", "возраст", "цель",
+                             "набор", "массы", "масса", "похудение", "сушка", "снижение", "поддержание"}
+
+
+def looks_like_profile(text: str) -> bool:
+    """«76 175 м 50» — профиль без слова «профиль»: 3 числа + пол, других слов нет."""
+    tokens = normalize(_prepare(text)).replace(",", " ").split()
+    nums = [t for t in tokens if re.fullmatch(r"\d+(\.\d+)?", t)]
+    words = [t for t in tokens if t not in nums]
+    return len(nums) == 3 and any(t in SEX_WORDS for t in words) and all(t in PROFILE_WORDS for t in words)
 
 
 def targets(p) -> dict:

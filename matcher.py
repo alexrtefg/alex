@@ -35,6 +35,7 @@ class MatchResult:
     status: str                  # "ok" | "ask" | "none"
     key: str | None = None       # найденное упражнение (status == ok)
     options: list | None = None  # [(key, score), ...] для кнопок (status == ask)
+    score: float = 0             # насколько уверенно найдено (100 — точное совпадение)
 
 
 class Matcher:
@@ -67,7 +68,7 @@ class Matcher:
         if not q:
             return MatchResult("none")
         if q in self.alias_to_key:
-            return MatchResult("ok", self.alias_to_key[q])
+            return MatchResult("ok", self.alias_to_key[q], score=100)
 
         prefer = set(prefer or [])
         found = process.extract(q, list(self.alias_to_key), scorer=similarity, limit=30)
@@ -83,5 +84,5 @@ class Matcher:
         top_key, top = ranked[0]
         second = ranked[1][1] if len(ranked) > 1 else 0
         if top >= ACCEPT_SCORE and top - second >= MIN_GAP:
-            return MatchResult("ok", top_key)
-        return MatchResult("ask", options=[kv for kv in ranked[:4] if kv[1] >= max(ASK_SCORE, top - 15)])
+            return MatchResult("ok", top_key, score=top)
+        return MatchResult("ask", score=top, options=[kv for kv in ranked[:4] if kv[1] >= max(ASK_SCORE, top - 15)])

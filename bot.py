@@ -505,7 +505,7 @@ async def on_text(message: Message):
             await message.answer(plates_text(float(m.group(3).replace(",", ".")), bar))
         return
 
-    if low.startswith("профиль"):
+    if low.startswith("профиль") or nut.looks_like_profile(text):
         try:
             p = nut.parse_profile(text)
         except ValueError as e:
