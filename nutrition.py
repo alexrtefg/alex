@@ -59,6 +59,73 @@ def _prepare(text: str) -> str:
 _ALIASES_WITH_AND = sorted((a for a in food_matcher.alias_to_key if " и " in a), key=len, reverse=True)
 
 
+# ---------- свои продукты ----------
+
+def custom_key(food_id: int) -> str:
+    return f"my{food_id}"
+
+
+def register_custom(row):
+    """Добавить свой продукт (из базы) в справочник и в поиск."""
+    from foods import Food
+    portions = {"порция": row["portion"] or row["piece"] or 100}
+    if row["piece"]:
+        portions["шт"] = row["piece"]
+    if row["portion"]:
+        portions["тарелка"] = row["portion"]
+    f = Food(custom_key(row["id"]), row["name"], row["kcal"], row["protein"], row["fat"], row["carbs"],
+             (row["name"].lower(),), portions)
+    FOOD_BY_KEY[f.key] = f
+    food_matcher.learn(row["name"], f.key)
+    return f
+
+
+def unregister_custom(food_id: int):
+    key = custom_key(food_id)          # в справочнике оставляем (для названий в старых записях), убираем из поиска
+    for alias in [a for a, k in food_matcher.alias_to_key.items() if k == key]:
+        food_matcher.alias_to_key.pop(alias)
+
+
+CUSTOM_HELP = ("Формат: добавь продукт НАЗВАНИЕ ккал белки жиры углеводы (на 100 г) [шт ГРАММ] [порция ГРАММ]\n"
+               "Пример: добавь продукт хинкали 235 10 12 22 шт 80\n"
+               "Или с подписями: добавь продукт сырники домашние ккал 220 б 15 ж 10 у 18 шт 60\n"
+               "Цифры бери с упаковки или из интернета («хинкали калорийность»).")
+
+
+def parse_custom_food(text: str) -> dict:
+    """«добавь продукт хинкали 235 10 12 22 шт 80» -> {name, kcal, protein, fat, carbs, piece, portion}."""
+    s = text.lower().replace("ё", "е").replace(",", ".")
+    s = re.sub(r"^\s*(добавь|добавить|новый|создай)\s+(продукт|еду|блюдо)\s*:?", "", s).strip()
+    piece = portion = None
+    m = re.search(r"\b(шт|штука|1\s*шт)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*г?", s)
+    if m:
+        piece = float(m.group(2))
+        s = s[:m.start()] + s[m.end():]
+    m = re.search(r"\b(порция|тарелка)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*г?", s)
+    if m:
+        portion = float(m.group(2))
+        s = s[:m.start()] + s[m.end():]
+    labels = {"kcal": r"(?:ккал|кал|калори\w*)", "protein": r"(?:б|белк\w*|белок)", "fat": r"(?:ж|жир\w*)",
+              "carbs": r"(?:у|углевод\w*)"}
+    vals = {}
+    for k, lab in labels.items():
+        m = re.search(rf"\b{lab}\s*[:=]?\s*(\d+(?:\.\d+)?)", s)
+        if m:
+            vals[k] = float(m.group(1))
+            s = s[:m.start()] + " " + s[m.end():]
+    m = re.match(r"\s*([^\d]+?)\s*(?=\d|$)", s)
+    name = m.group(1).strip(" :-") if m else ""
+    nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", s[m.end():] if m else s)]
+    for k in ("kcal", "protein", "fat", "carbs"):
+        if k not in vals and nums:
+            vals[k] = nums.pop(0)
+    if not name or len(vals) < 4:
+        raise ValueError("Не хватает данных.\n" + CUSTOM_HELP)
+    if not (0 <= vals["kcal"] <= 950 and all(0 <= vals[k] <= 100 for k in ("protein", "fat", "carbs"))):
+        raise ValueError("Странные цифры: калории 0–950, белки/жиры/углеводы 0–100 на 100 г.\n" + CUSTOM_HELP)
+    return dict(name=name[:40], piece=piece, portion=portion, **vals)
+
+
 def split_items(text: str) -> list[str]:
     s = _prepare(text)
     for p in FOOD_PREFIXES:

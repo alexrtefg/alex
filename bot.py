@@ -63,6 +63,10 @@ def get_signal(user_id: int):
 
 
 timers = Timers(get_signal)
+pending_edit: dict[int, int] = {}     # правка старой записи: user_id -> entry_id (ждём новые цифры)
+for _row in db.custom_foods():        # свои продукты — в справочник и поиск
+    nut.register_custom(_row)
+TRAIN_REMIND_HOUR = 12                # когда напоминать о тренировке, если по ритму пора
 
 BTN_START = "▶️ Начать"
 BTN_FINISH = "⏹ Завершить"
@@ -126,6 +130,9 @@ HELP = (
     "• вес 84,5 — записать вес тела\n\n"
     "💪 После записи — кнопки «😌 Легко / 💪 Норм / 🥵 Тяжело»: бот подскажет, когда прибавлять вес.\n"
     "🤕 Боль: напиши «болит плечо» — запишу и учту в итоге дня.\n"
+    "✏️ Исправить старую запись: «📅 История» → тренировка → нажми на запись.\n"
+    "🍲 Свой продукт: «добавь продукт хинкали 235 10 12 22 шт 80» (ккал, Б, Ж, У на 100 г), список — «мои продукты».\n"
+    "🔔 Напоминание о тренировке в 12:00, если по ритму пора: /train_off, /train_on, /train_test.\n"
     "📏 Замеры: «талия 88 грудь 102 бицепс 38 бедро 58 шея 40» (раз в месяц напомню), «замеры» — история.\n\n"
     "😴 СОН: кнопка «😴 Сон» или «сон 7», «спал 7,5», «сон 23:30-7:00».\n\n"
     "📋 ИТОГ ДНЯ: тренировка + питание + вода + сон вместе — что в норме, чего не хватает, "
@@ -477,7 +484,7 @@ async def history(message: Message):
         kb.button(text=f"{reports.ddmmyyyy(w['day'])} · {WT_SHORT.get(w['wtype'], '')}",
                   callback_data=f"hist:{w['id']}")
     kb.adjust(2)
-    await message.answer("Последние тренировки:", reply_markup=kb.as_markup())
+    await message.answer("Последние тренировки (нажми, чтобы посмотреть или исправить):", reply_markup=kb.as_markup())
 
 
 @router.callback_query(F.data.startswith("hist:"))
@@ -487,7 +494,147 @@ async def on_history(cb: CallbackQuery):
     await cb.answer()
     if not w or w["user_id"] != cb.from_user.id:
         return
-    await cb.message.answer(reports.workout_report(db, wid))
+    await send_workout_editor(cb.message, wid)
+
+
+def entry_label(e) -> str:
+    rows = db.entry_sets(e["id"])
+    return f"{reports.ex_name(e['exercise_key'])}: {reports.fmt_sets(rows) if rows else '—'}"
+
+
+async def send_workout_editor(message: Message, wid: int):
+    kb = InlineKeyboardBuilder()
+    entries = db.workout_entries(wid)
+    for i, e in enumerate(entries, 1):
+        kb.button(text=f"✏️ {i}. {entry_label(e)}"[:60], callback_data=f"ent:{e['id']}")
+    kb.button(text="🗑 Удалить всю тренировку", callback_data=f"wdel:{wid}")
+    kb.adjust(1)
+    hint = "\n\nНажми на запись, чтобы исправить или удалить её." if entries else ""
+    await message.answer(reports.workout_report(db, wid) + hint, reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("ent:"))
+async def on_entry(cb: CallbackQuery):
+    eid = int(cb.data.split(":")[1])
+    e = db.get_entry(eid)
+    await cb.answer()
+    if not e or db.get_workout(e["workout_id"])["user_id"] != cb.from_user.id:
+        await cb.message.answer("Запись уже удалена.")
+        return
+    pending_edit[cb.from_user.id] = eid
+    ex = BY_KEY.get(e["exercise_key"])
+    example = "3 0 10 или 1 20 10" if ex and ex.bodyweight else "3 80 8"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Удалить запись", callback_data=f"entdel:{eid}")
+    kb.button(text="🔄 Другое упражнение", callback_data=f"entex:{eid}")
+    kb.button(text="⬅️ Отмена", callback_data="entcancel")
+    kb.adjust(2, 1)
+    await cb.message.answer(f"✏️ {entry_label(e)}\n\nНапиши новые цифры (подходы, вес, повторы), например {example} — "
+                            "и я заменю запись.", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data == "entcancel")
+async def on_entry_cancel(cb: CallbackQuery):
+    pending_edit.pop(cb.from_user.id, None)
+    await cb.answer("Отменено")
+    try:
+        await cb.message.edit_text("Правка отменена.")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("entdel:"))
+async def on_entry_delete(cb: CallbackQuery):
+    eid = int(cb.data.split(":")[1])
+    e = db.get_entry(eid)
+    pending_edit.pop(cb.from_user.id, None)
+    await cb.answer()
+    if not e or db.get_workout(e["workout_id"])["user_id"] != cb.from_user.id:
+        return
+    db.delete_entry(eid)
+    await cb.message.answer(f"🗑 Удалено: {reports.ex_name(e['exercise_key'])}")
+    await send_workout_editor(cb.message, e["workout_id"])
+
+
+@router.callback_query(F.data.startswith("entex:"))
+async def on_entry_exercise(cb: CallbackQuery):
+    eid = int(cb.data.split(":")[1])
+    kb = InlineKeyboardBuilder()
+    for g, title in GROUPS.items():
+        kb.button(text=title, callback_data=f"entg:{eid}:{g}")
+    kb.adjust(3)
+    await cb.answer()
+    await cb.message.answer("На какое упражнение заменить? Выбери группу:", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("entg:"))
+async def on_entry_group(cb: CallbackQuery):
+    _, eid, g = cb.data.split(":")
+    kb = InlineKeyboardBuilder()
+    for e in EXERCISES:
+        if e.group == g:
+            kb.button(text=e.name, callback_data=f"entset:{eid}:{e.key}")
+    kb.adjust(1)
+    await cb.answer()
+    await cb.message.answer(f"{GROUPS[g]}:", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("entset:"))
+async def on_entry_set_exercise(cb: CallbackQuery):
+    _, eid, key = cb.data.split(":")
+    e = db.get_entry(int(eid))
+    await cb.answer()
+    if not e:
+        return
+    w = db.get_workout(e["workout_id"])
+    ex = BY_KEY[key]
+    bw = db.body_weight_on(cb.from_user.id, date.fromisoformat(w["day"])) if ex.bw_factor else None
+    db.set_entry_exercise(int(eid), key, round(bw * ex.bw_factor, 1) if bw else 0.0)
+    pending_edit.pop(cb.from_user.id, None)
+    await cb.message.answer(f"✅ Заменил на: {ex.name}")
+    await send_workout_editor(cb.message, e["workout_id"])
+
+
+async def apply_edit(message: Message, user_id: int, eid: int, numbers: str):
+    e = db.get_entry(eid)
+    if not e:
+        await message.answer("Запись уже удалена.")
+        return
+    key = e["exercise_key"]
+    ex = BY_KEY[key]
+    numbers, note = fix_order(user_id, key, numbers)
+    try:
+        rows = parse_sets(numbers, bodyweight=ex.bodyweight)
+    except ParseError as err:
+        await message.answer(f"⚠️ {err}")
+        pending_edit[user_id] = eid
+        return
+    w = db.get_workout(e["workout_id"])
+    bw = db.body_weight_on(user_id, date.fromisoformat(w["day"])) if ex.bw_factor else None
+    db.replace_entry_sets(eid, rows, round(bw * ex.bw_factor, 1) if bw else 0.0)
+    await message.answer(f"✅ Исправлено: {ex.name} — " + reports.human_sets(
+        [dict(reps=r.reps, weight=r.weight, extra=r.extra) for r in rows]) + (f"\n{note}" if note else ""))
+    await send_workout_editor(message, e["workout_id"])
+
+
+@router.callback_query(F.data.startswith("wdel:"))
+async def on_workout_delete(cb: CallbackQuery):
+    wid = int(cb.data.split(":")[1])
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Да, удалить", callback_data=f"wdelok:{wid}")
+    kb.button(text="Нет", callback_data="entcancel")
+    await cb.answer()
+    await cb.message.answer("Точно удалить всю тренировку со всеми записями?", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("wdelok:"))
+async def on_workout_delete_ok(cb: CallbackQuery):
+    wid = int(cb.data.split(":")[1])
+    w = db.get_workout(wid)
+    await cb.answer()
+    if w and w["user_id"] == cb.from_user.id:
+        db.delete_workout(wid)
+        await cb.message.edit_text(f"🗑 Тренировка {reports.ddmmyyyy(w['day'])} удалена.")
 
 
 # ---------- выбор упражнения из вариантов ----------
@@ -578,6 +725,41 @@ async def on_text(message: Message):
     low = text.lower().replace("ё", "е")
     if low.startswith("/"):
         await message.answer("Не знаю такую команду.\n\n" + HELP)
+        return
+
+    eid = pending_edit.pop(user_id, None)
+    if eid and re.fullmatch(r"[\d\s.,+хx*×]+", low) and re.search(r"\d", low):
+        await apply_edit(message, user_id, eid, split_name(text)[1])
+        return
+
+    if re.match(r"(добавь|добавить|новый|создай)\s+(продукт|еду|блюдо)", low):
+        try:
+            data = nut.parse_custom_food(text)
+        except ValueError as e:
+            await message.answer(str(e))
+            return
+        fid = db.add_custom_food(user_id, **data)
+        f = nut.register_custom(db.conn.execute("SELECT * FROM custom_foods WHERE id=?", (fid,)).fetchone())
+        extra = f", 1 шт = {fmt_kg(data['piece'])} г" if data["piece"] else ""
+        extra += f", порция = {fmt_kg(data['portion'])} г" if data["portion"] else ""
+        await message.answer(f"✅ Добавил продукт «{f.name}»: на 100 г {fmt_kg(f.kcal)} ккал · Б {fmt_kg(f.protein)} · "
+                             f"Ж {fmt_kg(f.fat)} · У {fmt_kg(f.carbs)}{extra}.\n"
+                             f"Теперь пиши как обычно: {f.name} 2 шт · {f.name} 300 г\nСписок: мои продукты")
+        return
+
+    if low in ("мои продукты", "/myfoods"):
+        rows = db.custom_foods(user_id)
+        if not rows:
+            await message.answer("Своих продуктов пока нет.\n" + nut.CUSTOM_HELP)
+            return
+        kb = InlineKeyboardBuilder()
+        lines = ["🍲 Мои продукты (на 100 г):"]
+        for r in rows:
+            lines.append(f"• {r['name']}: {fmt_kg(r['kcal'])} ккал · Б {fmt_kg(r['protein'])} · Ж {fmt_kg(r['fat'])} · "
+                         f"У {fmt_kg(r['carbs'])}" + (f" · шт {fmt_kg(r['piece'])} г" if r["piece"] else ""))
+            kb.button(text=f"🗑 {r['name']}", callback_data=f"cfdel:{r['id']}")
+        kb.adjust(2)
+        await message.answer("\n".join(lines), reply_markup=kb.as_markup())
         return
 
     m = re.fullmatch(r"(болит|боль|побаливает|ноет|тянет)\s+(.+)", low)
@@ -797,7 +979,9 @@ async def handle_food(message: Message, user_id: int, text: str):
         out.append("✅ Записал:\n" + "\n".join(lines))
     if unknown:
         out.append("❓ Не нашёл: " + ", ".join(f"«{u}»" for u in unknown) +
-                   "\nНапиши иначе или добавь продукт в файл foods.py.")
+                   "\nНапиши иначе или добавь свой продукт, например:\n"
+                   f"добавь продукт {unknown[0].split()[0]} 235 10 12 22 шт 80\n"
+                   "(ккал, белки, жиры, углеводы на 100 г — с упаковки или из интернета)")
     out.append(day_summary(user_id))
     kb = nut_undo_kb(food_ids, water_ids) if (food_ids or water_ids) else None
     await message.answer("\n\n".join(out), reply_markup=kb)
@@ -842,7 +1026,8 @@ def food_menu_kb():
     kb.button(text="Вчера", callback_data="nut:yesterday")
     kb.button(text="Неделя", callback_data="nut:week")
     kb.button(text="👤 Профиль и норма", callback_data="nut:profile")
-    kb.adjust(2, 1)
+    kb.button(text="🗑 Удалить продукт", callback_data="nut:del")
+    kb.adjust(2, 2)
     return kb.as_markup()
 
 
@@ -858,11 +1043,50 @@ async def food_today(message: Message):
                          reply_markup=food_menu_kb())
 
 
+@router.callback_query(F.data.startswith("fdel:"))
+async def on_food_delete(cb: CallbackQuery):
+    user_id = cb.from_user.id
+    what = cb.data.split(":")[1]
+    await cb.answer()
+    if what == "water":
+        row = db.conn.execute("SELECT id, ml FROM water_log WHERE user_id=? AND day=? ORDER BY id DESC LIMIT 1",
+                              (user_id, clock.today().isoformat())).fetchone()
+        if row:
+            db.delete_water(user_id, row["id"])
+            await cb.message.answer(f"🗑 Убрал воду {row['ml']:.0f} мл.\n{day_summary(user_id)}")
+        return
+    if db.delete_food(user_id, int(what)):
+        await cb.message.answer(f"🗑 Удалено.\n{day_summary(user_id)}")
+    else:
+        await cb.message.answer("Эта запись уже удалена.")
+
+
+@router.callback_query(F.data.startswith("cfdel:"))
+async def on_custom_food_delete(cb: CallbackQuery):
+    fid = int(cb.data.split(":")[1])
+    await cb.answer()
+    if db.delete_custom_food(cb.from_user.id, fid):
+        nut.unregister_custom(fid)
+        await cb.message.answer("🗑 Продукт удалён из справочника (старые записи еды остались).")
+
+
 @router.callback_query(F.data.startswith("nut:"))
 async def on_nut(cb: CallbackQuery):
     kind = cb.data.split(":")[1]
     user_id = cb.from_user.id
     await cb.answer()
+    if kind == "del":
+        rows = db.food_day(user_id, clock.today())
+        kb = InlineKeyboardBuilder()
+        for r in rows:
+            f = nut.FOOD_BY_KEY.get(r["food_key"])
+            kb.button(text=f"🗑 {(f.name if f else r['food_key'])[:30]} · {r['grams']:.0f} г", callback_data=f"fdel:{r['id']}")
+        if db.water_day(user_id, clock.today()):
+            kb.button(text="🗑 Последнюю запись воды", callback_data="fdel:water")
+        kb.adjust(1)
+        await cb.message.answer("Что удалить из сегодняшнего питания?" if rows else "За сегодня еды не записано.",
+                                reply_markup=kb.as_markup())
+        return
     if kind == "yesterday":
         await cb.message.answer(food_day_text(user_id, clock.today() - timedelta(days=1), "Питание за"))
     elif kind == "profile":
@@ -935,6 +1159,73 @@ def water_reminder_text(user_id: int, now: datetime) -> str | None:
             f"Осталось {left:.0f} мл (≈{left / GLASS:.0f} стак. по {GLASS} мл). Сейчас выпей ≈{per} мл.")
 
 
+def rhythm_days(user_id: int) -> float:
+    """Твой обычный интервал между тренировками (по последним 8), от 3 до 7 дней; по умолчанию 4."""
+    days = sorted({date.fromisoformat(w["day"]) for w in db.recent_workouts(user_id, 9)})
+    if len(days) < 3:
+        return 4
+    gaps = [(b - a).days for a, b in zip(days, days[1:])]
+    return min(7, max(3, sum(gaps) / len(gaps)))
+
+
+def train_reminder_text(user_id: int) -> str | None:
+    """Напоминание, если по ритму пора тренироваться и сегодня тренировки ещё не было."""
+    last = db.last_workout(user_id)
+    if not last or last["day"] == clock.today().isoformat():
+        return None
+    days = (clock.today() - date.fromisoformat(last["day"])).days
+    rhythm = rhythm_days(user_id)
+    if days < round(rhythm):
+        return None
+    nxt = "Б — ноги" if last["wtype"] == "A" else "А — грудь, спина, руки"
+    text = (f"🏋️ Прошло {days} дн. с прошлой тренировки ({reports.ddmmyyyy(last['day'])}, "
+            f"{WT_SHORT.get(last['wtype'], '')}). Твой ритм — раз в {fmt_kg(round(rhythm, 1))} дн., значит сегодня тренировка!\n"
+            f"Следующая по очереди: {nxt}. Или собери свою: «🧠 План».")
+    if days >= rhythm + 3:
+        text += "\n⚠️ Перерыв затянулся — начни с весами на ~10% ниже, чтобы втянуться без травм."
+    sleep = db.get_sleep(user_id, clock.today())
+    if sleep is not None and sleep < 6:
+        text += f"\n😴 Спал {summary.fmt_hours(sleep)} — сегодня работай без рекордов."
+    return text
+
+
+def train_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="▶️ Начать тренировку", callback_data="go:start")
+    kb.button(text="🧠 План", callback_data="pg:open")
+    return kb.as_markup()
+
+
+@router.callback_query(F.data == "go:start")
+async def on_go_start(cb: CallbackQuery):
+    await cb.answer()
+    await ask_workout_type(cb.message, cb.from_user.id)
+
+
+@router.message(Command("train_off"))
+async def train_off(message: Message):
+    db.set_setting(message.from_user.id, "train_rem", "0")
+    await message.answer("🔕 Напоминания о тренировке выключены. Включить: /train_on")
+
+
+@router.message(Command("train_on"))
+async def train_on(message: Message):
+    db.set_setting(message.from_user.id, "train_rem", "1")
+    await message.answer(f"🔔 Напоминания о тренировке включены: в {TRAIN_REMIND_HOUR}:00, если по твоему ритму пора.\n"
+                         "Проверить: /train_test")
+
+
+@router.message(Command("train_test"))
+async def train_test(message: Message):
+    text = train_reminder_text(message.from_user.id)
+    if not text:
+        last = db.last_workout(message.from_user.id)
+        text = ("Тренировок ещё нет — напоминать пока не о чем." if not last else
+                f"Пока рано: по ритму следующая тренировка через "
+                f"{max(0, round(rhythm_days(message.from_user.id)) - (clock.today() - date.fromisoformat(last['day'])).days)} дн.")
+    await message.answer(text, reply_markup=train_kb())
+
+
 async def water_reminders(bot: Bot):
     sent: set[str] = set()
     while True:
@@ -949,6 +1240,19 @@ async def water_reminders(bot: Bot):
                         await bot.send_message(uid, "📏 Новый месяц — время замеров!\n" + measures.HOWTO)
                     except Exception:
                         logging.exception("Не удалось отправить напоминание о замерах")
+        if now.hour == TRAIN_REMIND_HOUR:
+            for uid in db.reminder_users():
+                stamp = f"t {uid} {clock.today()}"
+                if stamp in sent:
+                    continue
+                sent.add(stamp)
+                try:
+                    if db.get_setting(uid, "train_rem", "1") == "1":
+                        text = train_reminder_text(uid)
+                        if text:
+                            await bot.send_message(uid, text, reply_markup=train_kb())
+                except Exception:
+                    logging.exception("Не удалось отправить напоминание о тренировке")
         if now.hour not in REMIND_HOURS:
             continue
         for uid in db.reminder_users():

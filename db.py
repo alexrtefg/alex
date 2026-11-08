@@ -86,6 +86,17 @@ CREATE TABLE IF NOT EXISTS measurements (
     part    TEXT NOT NULL,          -- waist, chest, biceps, thigh, neck
     value   REAL NOT NULL           -- см
 );
+CREATE TABLE IF NOT EXISTS custom_foods (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name    TEXT NOT NULL,
+    kcal    REAL NOT NULL,          -- на 100 г
+    protein REAL NOT NULL,
+    fat     REAL NOT NULL,
+    carbs   REAL NOT NULL,
+    piece   REAL,                   -- граммов в 1 шт (если есть)
+    portion REAL                    -- граммов в порции/тарелке
+);
 CREATE TABLE IF NOT EXISTS settings (
     user_id INTEGER NOT NULL,
     key     TEXT NOT NULL,
@@ -395,3 +406,47 @@ class DB:
     def last_measure_day(self, user_id: int) -> str | None:
         row = self.conn.execute("SELECT MAX(day) d FROM measurements WHERE user_id=?", (user_id,)).fetchone()
         return row["d"] if row else None
+
+    # --- правка старых записей ---
+    def workout_entries(self, workout_id: int):
+        return self.conn.execute("SELECT * FROM entries WHERE workout_id=? ORDER BY id", (workout_id,)).fetchall()
+
+    def entry_sets(self, entry_id: int):
+        return self.conn.execute("SELECT * FROM sets WHERE entry_id=? ORDER BY set_no", (entry_id,)).fetchall()
+
+    def replace_entry_sets(self, entry_id: int, rows: list[SetRow], body: float = 0.0):
+        old = self.entry_sets(entry_id)
+        start = old[0]["set_no"] - 1 if old else 0
+        self.conn.execute("DELETE FROM sets WHERE entry_id=?", (entry_id,))
+        self.conn.executemany(
+            "INSERT INTO sets(entry_id, set_no, reps, weight, extra, body) VALUES (?,?,?,?,?,?)",
+            [(entry_id, start + i + 1, r.reps, r.weight, r.extra, body) for i, r in enumerate(rows)])
+        self.conn.commit()
+
+    def set_entry_exercise(self, entry_id: int, exercise_key: str, body: float):
+        self.conn.execute("UPDATE entries SET exercise_key=? WHERE id=?", (exercise_key, entry_id))
+        self.conn.execute("UPDATE sets SET body=? WHERE entry_id=?", (body, entry_id))
+        self.conn.commit()
+
+    def delete_workout(self, workout_id: int):
+        self.conn.execute("DELETE FROM workouts WHERE id=?", (workout_id,))
+        self.conn.commit()
+
+    # --- свои продукты ---
+    def add_custom_food(self, user_id: int, name: str, kcal: float, protein: float, fat: float, carbs: float,
+                        piece: float | None = None, portion: float | None = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO custom_foods(user_id, name, kcal, protein, fat, carbs, piece, portion) VALUES (?,?,?,?,?,?,?,?)",
+            (user_id, name, kcal, protein, fat, carbs, piece, portion))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def custom_foods(self, user_id: int | None = None):
+        if user_id is None:
+            return self.conn.execute("SELECT * FROM custom_foods ORDER BY id").fetchall()
+        return self.conn.execute("SELECT * FROM custom_foods WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
+
+    def delete_custom_food(self, user_id: int, food_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM custom_foods WHERE id=? AND user_id=?", (food_id, user_id))
+        self.conn.commit()
+        return cur.rowcount > 0

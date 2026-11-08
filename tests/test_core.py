@@ -376,3 +376,27 @@ def test_day_ends_at_4am(monkeypatch):
             return real_dt(2026, 11, 9, 1, 30)
     monkeypatch.setattr(clock, "datetime", Fake)
     assert clock.today() == date(2026, 11, 8)       # 01:30 ночи — ещё «вчерашний» день
+
+
+def test_custom_food_and_edit(tmp_path):
+    d = nut.parse_custom_food("добавь продукт хинкали 235 10 12 22 шт 80")
+    assert d == dict(name="хинкали", kcal=235, protein=10, fat=12, carbs=22, piece=80, portion=None)
+    d2 = nut.parse_custom_food("добавь продукт сырники домашние ккал 220 б 15 ж 10 у 18 шт 60")
+    assert d2["name"] == "сырники домашние" and d2["protein"] == 15 and d2["piece"] == 60
+    with pytest.raises(ValueError):
+        nut.parse_custom_food("добавь продукт хинкали")
+    db = DB(str(tmp_path / "c.db"))
+    fid = db.add_custom_food(1, **d)
+    nut.register_custom(db.custom_foods(1)[0])
+    assert [(i.key, i.grams) for i in nut.parse_food_text("хинкали 5 штук")] == [(f"my{fid}", 400)]
+    nut.unregister_custom(fid)
+    assert nut.parse_food_text("хинкали 5 штук")[0].status == "none"
+    # правка старой записи
+    w = db.start_workout(1, "B", date(2026, 11, 2))
+    e = db.add_entry(w, "squat", parse_sets("3 80 6"))
+    db.replace_entry_sets(e, parse_sets("3 85 6"))
+    assert reports.tonnage(db.workout_sets(w)) == 3 * 6 * 85
+    db.set_entry_exercise(e, "front_squat", 0)
+    assert db.workout_sets(w)[0]["exercise_key"] == "front_squat"
+    db.delete_workout(w)
+    assert db.get_workout(w) is None
