@@ -29,6 +29,8 @@ import nutrition as nut
 from timer import DEFAULT_SIGNAL, Timers, mmss, parse_duration
 import summary
 import measures
+import planner
+import json
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -70,6 +72,7 @@ BTN_REST = "⏱ Отдых"
 BTN_EXERCISES = "🏋️ Упражнения"
 BTN_DAY = "📋 Итог дня"
 BTN_SLEEP = "😴 Сон"
+BTN_PLAN = "🧠 План"
 
 # Старые надписи кнопок (если на телефоне осталась прежняя клавиатура) — тоже работают.
 OLD_BUTTONS = {"▶️ Начать тренировку": "▶️ Начать", "↩️ Отменить последнее": "↩️ Отменить", "💧 +250 мл": "💧 +200 мл"}
@@ -87,7 +90,7 @@ MENU = ReplyKeyboardMarkup(   # 4 ряда по 3 кнопки — всё вид
     keyboard=[[KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_EXERCISES), KeyboardButton(text=BTN_FINISH)],
               [KeyboardButton(text=BTN_REST), KeyboardButton(text=BTN_WATER), KeyboardButton(text=BTN_FOOD)],
               [KeyboardButton(text=BTN_SLEEP), KeyboardButton(text=BTN_DAY), KeyboardButton(text=BTN_REPORT)],
-              [KeyboardButton(text=BTN_HISTORY), KeyboardButton(text=BTN_UNDO), KeyboardButton(text=BTN_HELP)]],
+              [KeyboardButton(text=BTN_HISTORY), KeyboardButton(text=BTN_UNDO), KeyboardButton(text=BTN_PLAN)]],
     resize_keyboard=True,
     input_field_placeholder="3 80 8 — подходы, вес, повторы",
 )
@@ -126,6 +129,8 @@ HELP = (
     "💧 ВОДА: кнопка «+200 мл» (стакан) или «вода 500», «вода 2 стакана», «вода 1,5 л».\n"
     "Напоминания каждые 2 часа с 9 до 21, пока не выпита норма: /water_off — выключить, /water_on — включить, "
     "/water_test — проверить.\n\n"
+    "🧠 ПЛАН: кнопка «🧠 План» → отметь группы мышц → бот соберёт тренировку из твоего инвентаря "
+    "(подходы, повторы, вес от прошлого раза, техника). Там же — советы по сплитам.\n\n"
     "Ещё:\n"
     "• блины 90 — что повесить на гриф (блины ez 40 — для EZ-грифа)\n"
     "• гантели 10 — как собрать пару наборных гантелей по 10 кг\n"
@@ -140,7 +145,21 @@ def today_str() -> str:
     return date.today().strftime("%d.%m.%Y")
 
 
-def template_keys(wtype: str | None) -> list:
+WT_SHORT = {"A": "А", "B": "Б", "C": "своя"}
+
+
+def plan_items(user_id: int) -> list:
+    """Сохранённый план «🧠 План»: [[key, sets, reps], ...]."""
+    raw = db.get_setting(user_id, "plan_items")
+    try:
+        return json.loads(raw) if raw else []
+    except ValueError:
+        return []
+
+
+def template_keys(wtype: str | None, user_id: int | None = None) -> list:
+    if wtype == "C" and user_id:
+        return [k for k, _, _ in plan_items(user_id) if k in BY_KEY]
     return TEMPLATES[wtype]["exercises"] if wtype else []
 
 
@@ -189,8 +208,15 @@ async def after_record(message: Message, user_id: int, text: str, entry_ids: lis
         await start_rest(message, user_id, seconds, label)
 
 
-def exercise_menu_kb(wtype: str | None):
+def exercise_menu_kb(wtype: str | None, user_id: int | None = None):
     kb = InlineKeyboardBuilder()
+    if wtype == "C" and user_id:   # тренировка по плану: упражнения плана по порядку, с подходами
+        items = [it for it in plan_items(user_id) if it[0] in BY_KEY]
+        for i, (k, sets, reps) in enumerate(items, 1):
+            kb.button(text=f"{i}. {BY_KEY[k].name} · {sets}×{reps}", callback_data=f"sel:{k}")
+        kb.button(text="📋 Все упражнения по группам", callback_data="selall")
+        kb.adjust(1)
+        return kb.as_markup()
     keys = [k for k in template_keys(wtype) if k not in ABS_EXERCISES] if wtype else []
     for k in keys:
         kb.button(text=BY_KEY[k].name, callback_data=f"sel:{k}")
@@ -203,7 +229,7 @@ def exercise_menu_kb(wtype: str | None):
 
 async def ask_next_exercise(message: Message, user_id: int, title: str):
     active = db.active_workout(user_id)
-    await message.answer(title, reply_markup=exercise_menu_kb(active["wtype"] if active else None))
+    await message.answer(title, reply_markup=exercise_menu_kb(active["wtype"] if active else None, user_id))
 
 
 def selected_text(user_id: int, key: str, workout_id: int | None) -> str:
@@ -211,15 +237,22 @@ def selected_text(user_id: int, key: str, workout_id: int | None) -> str:
     last = reports.last_result_text(db, user_id, key, workout_id or -1)
     example = ("1 10 (подходы, повторы) · с весом: 1 20 10 (подходы, отягощение, повторы)"
                if ex.bodyweight else "1 75 10 (подходы, вес, повторы)")
-    return (f"👉 {ex.name}\n{last or 'записей ещё нет'}\n\n"
+    active = db.active_workout(user_id)
+    by_plan = ""
+    if active and active["wtype"] == "C":
+        it = next((it for it in plan_items(user_id) if it[0] == key), None)
+        if it:
+            by_plan = f"По плану: {it[1]}×{it[2]}\n"
+    return (f"👉 {ex.name}\n{by_plan}{last or 'записей ещё нет'}\n\n"
             f"Вводи цифры: {example}\nОтдых после подхода: {mmss(rest_for(key))}")
 
 
 def choose_type_kb(suggested: str):
     kb = InlineKeyboardBuilder()
-    for t in ([suggested] + [x for x in TEMPLATES if x != suggested]):
+    for t in ([suggested] + [x for x in ("A", "B") if x != suggested]):
         mark = "✅ " if t == suggested else ""
         kb.button(text=mark + TEMPLATES[t]["title"].replace("Тренировка ", ""), callback_data=f"wt:{t}")
+    kb.button(text="🧠 Собрать тренировку под себя", callback_data="pg:open")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -289,7 +322,7 @@ async def ask_workout_type(message: Message, user_id: int):
     text = f"📅 {today_str()}\nКакая сегодня тренировка?"
     if last:
         days = (date.today() - date.fromisoformat(last["day"])).days
-        text += f"\nПрошлая: {reports.ddmmyyyy(last['day'])} ({'А' if last['wtype'] == 'A' else 'Б'}), прошло {days} дн."
+        text += f"\nПрошлая: {reports.ddmmyyyy(last['day'])} ({WT_SHORT.get(last['wtype'], '')}), прошло {days} дн."
     await message.answer(text, reply_markup=choose_type_kb(suggested))
 
 
@@ -412,7 +445,7 @@ async def history(message: Message):
         return
     kb = InlineKeyboardBuilder()
     for w in ws:
-        kb.button(text=f"{reports.ddmmyyyy(w['day'])} · {'А' if w['wtype'] == 'A' else 'Б'}",
+        kb.button(text=f"{reports.ddmmyyyy(w['day'])} · {WT_SHORT.get(w['wtype'], '')}",
                   callback_data=f"hist:{w['id']}")
     kb.adjust(2)
     await message.answer("Последние тренировки:", reply_markup=kb.as_markup())
@@ -618,7 +651,7 @@ async def handle_entry(message: Message, user_id: int, text: str, workout_id: in
             return
         await save_entry(message, user_id, workout_id, key, numbers, BY_KEY[key].name)
         return
-    res = matcher.match(name, prefer=template_keys(wtype))
+    res = matcher.match(name, prefer=template_keys(wtype, user_id))
     if res.status == "ok":
         await save_entry(message, user_id, workout_id, res.key, numbers, name)
     elif res.status == "ask":
@@ -1097,6 +1130,117 @@ async def handle_measures(message: Message, user_id: int, low: str):
             line += f" ({'+' if d >= 0 else '−'}{fmt_kg(abs(round(d, 1)))} с {reports.ddmmyyyy(prev[-1]['day'])})"
         lines.append(line)
     await message.answer("\n".join(lines))
+
+
+# ---------- 🧠 План: тренировка из выбранных групп ----------
+
+plan_state: dict[int, dict] = {}   # user_id -> {"groups": set, "seed": int, "plan": Plan}
+PRESETS = {"full": ["chest", "back", "legs", "shoulders", "biceps", "triceps", "abs"],
+           "upper": ["chest", "back", "shoulders", "biceps", "triceps", "abs"],
+           "lower": ["legs", "abs"]}
+
+
+def groups_kb(selected_groups: set):
+    kb = InlineKeyboardBuilder()
+    for g, title in GROUPS.items():
+        kb.button(text=("✅ " if g in selected_groups else "") + title, callback_data=f"pg:t:{g}")
+    kb.button(text="🧍 Всё тело", callback_data="pg:p:full")
+    kb.button(text="⬆️ Верх", callback_data="pg:p:upper")
+    kb.button(text="⬇️ Ноги + пресс", callback_data="pg:p:lower")
+    kb.button(text="▶️ Собрать план", callback_data="pg:go")
+    kb.button(text="📅 Сплиты", callback_data="pg:split")
+    kb.button(text="❓ Помощь", callback_data="pg:help")
+    kb.adjust(4, 3, 3, 1, 2)
+    return kb.as_markup()
+
+
+def plan_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Начать по плану", callback_data="pg:start")
+    kb.button(text="🔄 Другой вариант", callback_data="pg:redo")
+    kb.button(text="📖 Техника", callback_data="pg:tech")
+    kb.button(text="⬅️ Другие группы", callback_data="pg:open")
+    kb.adjust(1, 2, 1)
+    return kb.as_markup()
+
+
+@router.message(Command("plan"))
+@router.message(btn(BTN_PLAN))
+async def plan_button(message: Message):
+    await open_group_picker(message, message.from_user.id)
+
+
+async def open_group_picker(message: Message, user_id: int):
+    st = plan_state.setdefault(user_id, {"groups": set(), "seed": 0, "plan": None})
+    await message.answer("🧠 Что тренируем сегодня? Отметь группы мышц (можно несколько) и нажми «▶️ Собрать план».\n"
+                         "Бот соберёт тренировку из твоего инвентаря.", reply_markup=groups_kb(st["groups"]))
+
+
+async def send_plan(message: Message, user_id: int):
+    st = plan_state[user_id]
+    st["plan"] = planner.build_plan(db, user_id, list(st["groups"]), seed=st["seed"])
+    await message.answer(planner.plan_text(st["plan"]), reply_markup=plan_kb())
+
+
+@router.callback_query(F.data.startswith("pg:"))
+async def on_plan(cb: CallbackQuery):
+    user_id = cb.from_user.id
+    parts = cb.data.split(":")
+    action = parts[1]
+    st = plan_state.setdefault(user_id, {"groups": set(), "seed": 0, "plan": None})
+    if action == "open":
+        await cb.answer()
+        await open_group_picker(cb.message, user_id)
+    elif action == "t":
+        g = parts[2]
+        st["groups"] ^= {g}
+        await cb.answer()
+        try:
+            await cb.message.edit_reply_markup(reply_markup=groups_kb(st["groups"]))
+        except Exception:
+            pass
+    elif action in ("p", "go", "redo"):
+        if action == "p":
+            st["groups"] = set(PRESETS[parts[2]])
+        if action == "redo":
+            st["seed"] += 1
+        if not st["groups"]:
+            await cb.answer("Отметь хотя бы одну группу", show_alert=True)
+            return
+        await cb.answer("Собираю…")
+        await send_plan(cb.message, user_id)
+    elif action == "tech":
+        await cb.answer()
+        if st.get("plan"):
+            await cb.message.answer(planner.technique_text(st["plan"]))
+    elif action == "split":
+        await cb.answer()
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🧍 Собрать фулбоди", callback_data="pg:p:full")
+        await cb.message.answer(planner.splits_text(db, user_id), reply_markup=kb.as_markup())
+    elif action == "help":
+        await cb.answer()
+        await cb.message.answer(HELP)
+    elif action == "start":
+        plan = st.get("plan")
+        if not plan or not plan.items:
+            await cb.answer("Сначала собери план", show_alert=True)
+            return
+        await cb.answer("Поехали! 💪")
+        db.set_setting(user_id, "plan_items", json.dumps([[i.key, i.sets, i.reps] for i in plan.items],
+                                                         ensure_ascii=False))
+        active = db.active_workout(user_id)
+        if active and active["day"] == date.today().isoformat():
+            db.conn.execute("UPDATE workouts SET wtype='C' WHERE id=?", (active["id"],))
+            db.conn.commit()
+        else:
+            if active and not db.delete_workout_if_empty(active["id"]):
+                db.finish_workout(active["id"])
+            db.start_workout(user_id, "C")
+        selected.pop(user_id, None)
+        await cb.message.answer(f"📅 Тренировка {today_str()} — по плану ({len(plan.items)} упр., ≈{plan.minutes} мин)")
+        await ask_wellbeing(cb.message)
+        await ask_next_exercise(cb.message, user_id, "🏋️ Упражнения по плану — нажимай по порядку:")
 
 
 # ---------- сон и итог дня ----------

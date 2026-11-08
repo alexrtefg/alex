@@ -159,8 +159,9 @@ def period_report(db: DB, user_id: int, kind: str, today: date | None = None) ->
     sets_only = [r for _, r in rows]
     total = tonnage(sets_only)
     lines = [f"📊 {title}", ""]
-    na = sum(1 for w in workouts if w["wtype"] == "A")
-    lines.append(f"Тренировок: {len(workouts)} (А: {na}, Б: {len(workouts) - na})")
+    cnt = {t: sum(1 for w in workouts if w["wtype"] == t) for t in ("A", "B", "C")}
+    kinds = f"А: {cnt['A']}, Б: {cnt['B']}" + (f", своя: {cnt['C']}" if cnt["C"] else "")
+    lines.append(f"Тренировок: {len(workouts)} ({kinds})")
     days = sorted({date.fromisoformat(w["day"]) for w in workouts})   # несколько записей в один день = один день
     if len(days) > 1:
         gaps = [(b - a).days for a, b in zip(days, days[1:])]

@@ -21,7 +21,7 @@ def export_xlsx(db: DB, user_id: int) -> bytes:
     for r in db.all_sets(user_id):
         ex = BY_KEY.get(r["exercise_key"])
         ws.append([
-            date.fromisoformat(r["day"]), "А" if r["wtype"] == "A" else "Б",
+            date.fromisoformat(r["day"]), {"A": "А", "B": "Б", "C": "своя"}.get(r["wtype"], r["wtype"]),
             ex.name if ex else r["exercise_key"], GROUPS.get(ex.group, "") if ex else "",
             r["set_no"], r["reps"], r["weight"], r["extra"], r["body"],
             {1: "легко", 2: "норм", 3: "тяжело"}.get(r["effort"], ""),

@@ -325,3 +325,33 @@ def test_measures(tmp_path):
     db.add_measure(1, "waist", 90, date(2026, 10, 1))
     db.add_measure(1, "waist", 87.5, date(2026, 11, 1))
     assert "Талия: 87,5 (было 90 на 01.10.2026, −2,5)" in measures.history_text(db, 1)
+
+
+def test_planner_rules(tmp_path):
+    import planner
+    from library import LIB, PATTERN
+    db = DB(str(tmp_path / "p.db"))
+    db.save_profile(1, 76, 175, "m", 50, "maintain")
+    day = date(2026, 11, 8)
+    for seed in range(6):
+        p = planner.build_plan(db, 1, list(planner.PRESETS if hasattr(planner, "PRESETS") else []) or
+                               ["chest", "back", "legs", "shoulders", "biceps", "triceps", "abs"], seed=seed, today=day)
+        keys = p.keys
+        assert len(keys) == len(set(keys))                                  # без повторов
+        assert sum(LIB[k].spine for k in keys) <= 2                         # поясница: не больше 2
+        assert len([k for k in keys if LIB[k].kind != "A"]) <= 7            # всё тело — до 7 упражнений + пресс
+        assert keys[-1] in [k for k in LIB if LIB[k].kind == "A"]           # пресс в конце
+    p = planner.build_plan(db, 1, ["chest"], today=day)
+    assert LIB[p.keys[0]].kind == "C"                                       # первым — базовое
+    pats = [PATTERN.get(k) for k in p.keys]
+    assert len(pats) == len(set(pats))                                      # разные движения
+    # болело плечо -> упражнения на плечо убраны
+    w = db.start_workout(1, "A", date(2026, 11, 5))
+    db.add_pain(w, "болит плечо")
+    p = planner.build_plan(db, 1, ["chest", "shoulders"], today=day)
+    assert all("shoulder" not in LIB[k].joints for k in p.keys)
+    assert any("плечо" in n for n in p.notes)
+    # мало сна -> подходов меньше
+    db.set_sleep(1, 5, day=day)
+    p2 = planner.build_plan(db, 1, ["back"], today=day)
+    assert all(i.sets <= LIB[i.key].sets - 1 or i.sets == 2 for i in p2.items)
