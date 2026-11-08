@@ -56,11 +56,11 @@ def get_signal(user_id: int):
 
 timers = Timers(get_signal)
 
-BTN_START = "▶️ Начать тренировку"
+BTN_START = "▶️ Начать"
 BTN_FINISH = "⏹ Завершить"
 BTN_REPORT = "📊 Отчёт"
 BTN_HISTORY = "📅 История"
-BTN_UNDO = "↩️ Отменить последнее"
+BTN_UNDO = "↩️ Отменить"
 BTN_HELP = "❓ Помощь"
 BTN_FOOD = "🍽 Питание"
 BTN_WATER = "💧 +200 мл"
@@ -69,16 +69,23 @@ BTN_EXERCISES = "🏋️ Упражнения"
 BTN_DAY = "📋 Итог дня"
 BTN_SLEEP = "😴 Сон"
 
+# Старые надписи кнопок (если на телефоне осталась прежняя клавиатура) — тоже работают.
+OLD_BUTTONS = {"▶️ Начать тренировку": "▶️ Начать", "↩️ Отменить последнее": "↩️ Отменить", "💧 +250 мл": "💧 +200 мл"}
+
+
+def btn(text: str):
+    """Фильтр кнопки: новая надпись или её старый вариант."""
+    return F.text.in_({text, *[old for old, new in OLD_BUTTONS.items() if new == text]})
+
+
 REMIND_HOURS = [9, 11, 13, 15, 17, 19, 21]   # когда напоминать про воду, пока не выпита норма
 GLASS = nut.GLASS_ML                         # стакан воды, мл
 
-MENU = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_FINISH)],
-              [KeyboardButton(text=BTN_EXERCISES), KeyboardButton(text=BTN_REST)],
-              [KeyboardButton(text=BTN_FOOD), KeyboardButton(text=BTN_WATER)],
-              [KeyboardButton(text=BTN_SLEEP), KeyboardButton(text=BTN_DAY)],
-              [KeyboardButton(text=BTN_REPORT), KeyboardButton(text=BTN_HISTORY)],
-              [KeyboardButton(text=BTN_UNDO), KeyboardButton(text=BTN_HELP)]],
+MENU = ReplyKeyboardMarkup(   # 4 ряда по 3 кнопки — всё видно на экране телефона без прокрутки
+    keyboard=[[KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_EXERCISES), KeyboardButton(text=BTN_FINISH)],
+              [KeyboardButton(text=BTN_REST), KeyboardButton(text=BTN_WATER), KeyboardButton(text=BTN_FOOD)],
+              [KeyboardButton(text=BTN_SLEEP), KeyboardButton(text=BTN_DAY), KeyboardButton(text=BTN_REPORT)],
+              [KeyboardButton(text=BTN_HISTORY), KeyboardButton(text=BTN_UNDO), KeyboardButton(text=BTN_HELP)]],
     resize_keyboard=True,
     input_field_placeholder="3 80 8 — подходы, вес, повторы",
 )
@@ -216,7 +223,7 @@ async def cmd_start(message: Message):
 
 
 @router.message(Command("help"))
-@router.message(F.text == BTN_HELP)
+@router.message(btn(BTN_HELP))
 async def cmd_help(message: Message):
     await message.answer(HELP, reply_markup=MENU)
 
@@ -249,7 +256,7 @@ async def cmd_backup(message: Message):
 # ---------- тренировка ----------
 
 @router.message(Command("new"))
-@router.message(F.text == BTN_START)
+@router.message(btn(BTN_START))
 async def start_workout(message: Message):
     await ask_workout_type(message, message.from_user.id)
 
@@ -300,7 +307,7 @@ async def on_workout_type(cb: CallbackQuery):
 
 
 @router.message(Command("finish"))
-@router.message(F.text == BTN_FINISH)
+@router.message(btn(BTN_FINISH))
 async def finish_workout(message: Message):
     active = db.active_workout(message.from_user.id)
     if not active:
@@ -310,10 +317,10 @@ async def finish_workout(message: Message):
         await message.answer("Тренировка была пустой, удалил её.")
         return
     db.finish_workout(active["id"])
-    await message.answer("🏁 Тренировка завершена!\n\n" + reports.workout_report(db, active["id"]))
+    await message.answer("🏁 Тренировка завершена!\n\n" + reports.workout_report(db, active["id"]), reply_markup=MENU)
 
 
-@router.message(F.text == BTN_UNDO)
+@router.message(btn(BTN_UNDO))
 async def undo_last(message: Message):
     active = db.active_workout(message.from_user.id)
     last = db.last_entry(active["id"]) if active else None
@@ -355,7 +362,7 @@ async def save_triset(message: Message, workout_id: int, rounds: int, reps: list
 # ---------- отчёты ----------
 
 @router.message(Command("report"))
-@router.message(F.text == BTN_REPORT)
+@router.message(btn(BTN_REPORT))
 async def report_menu(message: Message):
     kb = InlineKeyboardBuilder()
     for text, data in (("Тренировка", "rep:workout"), ("Неделя", "rep:week"), ("Месяц", "rep:month"),
@@ -382,7 +389,7 @@ async def on_report(cb: CallbackQuery):
 
 
 @router.message(Command("history"))
-@router.message(F.text == BTN_HISTORY)
+@router.message(btn(BTN_HISTORY))
 async def history(message: Message):
     ws = db.recent_workouts(message.from_user.id, 12)
     if not ws:
@@ -670,7 +677,7 @@ async def on_nut_undo(cb: CallbackQuery):
     await cb.answer()
 
 
-@router.message(F.text == BTN_WATER)
+@router.message(btn(BTN_WATER))
 async def water_button(message: Message):
     await add_water_and_reply(message, message.from_user.id, GLASS)
 
@@ -707,7 +714,7 @@ def food_day_text(user_id: int, day: date, title: str) -> str:
 
 
 @router.message(Command("food"))
-@router.message(F.text == BTN_FOOD)
+@router.message(btn(BTN_FOOD))
 async def food_today(message: Message):
     await message.answer(food_day_text(message.from_user.id, date.today(), "Питание за"),
                          reply_markup=food_menu_kb())
@@ -818,7 +825,7 @@ def message_user(message: Message) -> int:
 
 
 @router.message(Command("rest"))
-@router.message(F.text == BTN_REST)
+@router.message(btn(BTN_REST))
 async def rest_button(message: Message):
     user_id = message.from_user.id
     active = db.active_workout(user_id)
@@ -917,7 +924,7 @@ async def on_signal_choice(cb: CallbackQuery):
 # ---------- меню упражнений ----------
 
 @router.message(Command("ex"))
-@router.message(F.text == BTN_EXERCISES)
+@router.message(btn(BTN_EXERCISES))
 async def exercises_button(message: Message):
     user_id = message.from_user.id
     active = db.active_workout(user_id)
@@ -977,7 +984,7 @@ async def save_sleep(message: Message, user_id: int, hours: float):
 
 
 @router.message(Command("sleep"))
-@router.message(F.text == BTN_SLEEP)
+@router.message(btn(BTN_SLEEP))
 async def sleep_button(message: Message):
     kb = InlineKeyboardBuilder()
     for h in (5, 6, 7, 8, 9):
@@ -1005,7 +1012,7 @@ def day_kb():
 
 
 @router.message(Command("day"))
-@router.message(F.text == BTN_DAY)
+@router.message(btn(BTN_DAY))
 async def day_button(message: Message):
     await message.answer(summary.day_summary(db, message.from_user.id), reply_markup=day_kb())
 
