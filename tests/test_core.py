@@ -139,7 +139,7 @@ def test_db_and_reports(tmp_path):
     assert "Подтягивания — 3×8 +16 кг" in rep
     assert "02.11.2026" in reports.last_result_text(db, 1, "bench", w2)
     month = reports.period_report(db, 1, "month", today=date(2026, 11, 10))
-    assert "Тренировок: 2 (А: 2, Б: 0)" in month and "Средний интервал: 5.0" in month
+    assert "Тренировок: 2 (А: 2, Б: 0)" in month and "Средний интервал: 5 дн." in month
     ex = reports.exercise_report(db, 1, "bench")
     assert "Рекорд веса: 60 кг × 10" in ex
     assert db.delete_entry(e) and "Жим лёжа" not in reports.workout_report(db, w2)
@@ -285,3 +285,43 @@ def test_profile_without_word():
     assert nut.parse_profile("76 175 м 50") == dict(weight=76, height=175, sex="m", age=50, goal="maintain")
     assert nut.looks_like_profile("профиль 76 175 м 50")
     assert not nut.looks_like_profile("3 80 8") and not nut.looks_like_profile("2 яблока")
+
+
+def test_body_weight_tonnage_effort_interval(tmp_path):
+    from exercises import BY_KEY as EX
+    db = DB(str(tmp_path / "b.db"))
+    db.save_profile(1, 76, 175, "m", 50, "maintain")
+    w1 = db.start_workout(1, "A", date(2026, 11, 8))
+    e = db.add_entry(w1, "pullups", parse_sets("3 10", True), body=76 * EX["pullups"].bw_factor)
+    db.add_entry(w1, "hyperext", parse_sets("3 20 15", True), body=76 * EX["hyperext"].bw_factor)
+    db.set_effort(e, 1)
+    db.set_wellbeing(w1, 4)
+    db.add_pain(w1, "плечо")
+    rep = reports.workout_report(db, w1)
+    assert "Подтягивания — 3×10 (свой вес) (тоннаж 2280 кг) 😌" in rep        # 3 * 10 * 76
+    assert "Гиперэкстензия — 3×15 +20 кг (тоннаж 2610 кг)" in rep             # 3 * 15 * (20 + 38)
+    assert "Самочувствие: 4/5" in rep and "Болит: плечо" in rep
+    db.start_workout(1, "B", date(2026, 11, 8))                                # вторая запись в тот же день
+    month = reports.period_report(db, 1, "month", today=date(2026, 11, 10))
+    assert "Средний интервал" not in month                                     # один день — интервала нет
+
+
+def test_backfill_body(tmp_path):
+    db = DB(str(tmp_path / "f.db"))
+    db.save_profile(1, 80, 180, "m", 50, "maintain")
+    w = db.start_workout(1, "A", date(2026, 11, 1))
+    db.add_entry(w, "pullups", parse_sets("2 10", True))   # старая запись без веса тела
+    db.backfill_body({"pullups": 1.0})
+    assert reports.tonnage(db.workout_sets(w)) == 1600
+
+
+def test_measures(tmp_path):
+    import measures
+    assert measures.parse_measures("талия 88 грудь 102 бицепс 38 бедро 58 шея 40") == \
+        {"waist": 88, "chest": 102, "biceps": 38, "thigh": 58, "neck": 40}
+    assert measures.looks_like_measures("бедро 58") and not measures.looks_like_measures("бедро 150")
+    assert not measures.looks_like_measures("курица 150")
+    db = DB(str(tmp_path / "m.db"))
+    db.add_measure(1, "waist", 90, date(2026, 10, 1))
+    db.add_measure(1, "waist", 87.5, date(2026, 11, 1))
+    assert "Талия: 87,5 (было 90 на 01.10.2026, −2,5)" in measures.history_text(db, 1)

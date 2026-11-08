@@ -14,7 +14,8 @@ def export_xlsx(db: DB, user_id: int) -> bytes:
     ws = wb.active
     ws.title = "Подходы"
     ws.append(["Дата", "Тренировка", "Упражнение", "Группа", "Подход", "Повторы",
-               "Вес, кг", "Отягощение, кг", "Тоннаж, кг"])
+               "Вес, кг", "Отягощение, кг", "Вес тела в подходе, кг", "Тяжесть",
+               "Тоннаж, кг"])
     for c in ws[1]:
         c.font = Font(bold=True)
     for r in db.all_sets(user_id):
@@ -22,11 +23,13 @@ def export_xlsx(db: DB, user_id: int) -> bytes:
         ws.append([
             date.fromisoformat(r["day"]), "А" if r["wtype"] == "A" else "Б",
             ex.name if ex else r["exercise_key"], GROUPS.get(ex.group, "") if ex else "",
-            r["set_no"], r["reps"], r["weight"], r["extra"], r["reps"] * (r["weight"] + r["extra"]),
+            r["set_no"], r["reps"], r["weight"], r["extra"], r["body"],
+            {1: "легко", 2: "норм", 3: "тяжело"}.get(r["effort"], ""),
+            r["reps"] * (r["weight"] + r["extra"] + r["body"]),
         ])
     for row in ws.iter_rows(min_row=2, max_col=1):
         row[0].number_format = "DD.MM.YYYY"
-    for col, width in zip("ABCDEFGHI", (12, 11, 40, 10, 8, 9, 9, 14, 11)):
+    for col, width in zip("ABCDEFGHIJK", (12, 11, 40, 10, 8, 9, 9, 14, 12, 10, 11)):
         ws.column_dimensions[col].width = width
     ws.freeze_panes = "A2"
     buf = BytesIO()

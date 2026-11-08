@@ -28,6 +28,7 @@ from plates import fmt_kg, plates_text
 import nutrition as nut
 from timer import DEFAULT_SIGNAL, Timers, mmss, parse_duration
 import summary
+import measures
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -35,6 +36,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0").strip() or 0)
 DB_PATH = os.getenv("DB_PATH", "gym.db")
 
 db = DB(DB_PATH)
+db.backfill_body({e.key: e.bw_factor for e in EXERCISES if e.bw_factor})   # свой вес в старых записях подтягиваний
 matcher = Matcher(db.learned_aliases())
 router = Router()
 if OWNER_ID:  # бот отвечает только владельцу
@@ -115,6 +117,9 @@ HELP = (
     "• творог 200, 3 яйца, курица 150, хлеб 2 куска\n"
     "• профиль 85 180 м 50 — вес, рост, пол, возраст (можно добавить: набор / похудение)\n"
     "• вес 84,5 — записать вес тела\n\n"
+    "💪 После записи — кнопки «😌 Легко / 💪 Норм / 🥵 Тяжело»: бот подскажет, когда прибавлять вес.\n"
+    "🤕 Боль: напиши «болит плечо» — запишу и учту в итоге дня.\n"
+    "📏 Замеры: «талия 88 грудь 102 бицепс 38 бедро 58 шея 40» (раз в месяц напомню), «замеры» — история.\n\n"
     "😴 СОН: кнопка «😴 Сон» или «сон 7», «спал 7,5», «сон 23:30-7:00».\n\n"
     "📋 ИТОГ ДНЯ: тренировка + питание + вода + сон вместе — что в норме, чего не хватает, "
     "что в избытке и что сделать.\n\n"
@@ -139,11 +144,20 @@ def template_keys(wtype: str | None) -> list:
     return TEMPLATES[wtype]["exercises"] if wtype else []
 
 
-def undo_kb(entry_ids: list[int], rest_seconds: int | None = None):
+def undo_kb(entry_ids: list[int], rest_seconds: int | None = None, effort: bool = False):
     kb = InlineKeyboardBuilder()
+    sizes = []
+    if effort:  # как дался подход: нужно, чтобы понимать, пора ли прибавлять вес
+        last = entry_ids[-1]
+        kb.button(text="😌 Легко", callback_data=f"eff:{last}:1")
+        kb.button(text="💪 Норм", callback_data=f"eff:{last}:2")
+        kb.button(text="🥵 Тяжело", callback_data=f"eff:{last}:3")
+        sizes.append(3)
     kb.button(text="↩️ Отменить", callback_data="undo:" + ",".join(map(str, entry_ids)))
     if rest_seconds:
         kb.button(text=f"⏱ Отдых {mmss(rest_seconds)}", callback_data=f"rest:{rest_seconds}")
+    sizes.append(2 if rest_seconds else 1)
+    kb.adjust(*sizes)
     return kb.as_markup()
 
 
@@ -157,7 +171,7 @@ async def start_rest(message: Message, user_id: int, seconds: int, label: str):
 
 
 async def after_record(message: Message, user_id: int, text: str, entry_ids: list[int], seconds: int, label: str,
-                       n_sets: int = 1, hint: str = "1 75 10"):
+                       n_sets: int = 1, hint: str = "1 75 10", effort: bool = True):
     """Ответ на запись.
 
     1 подход  -> таймер отдыха (сам или по кнопке), упражнение остаётся выбранным: дальше просто цифры.
@@ -165,12 +179,12 @@ async def after_record(message: Message, user_id: int, text: str, entry_ids: lis
     """
     if n_sets > 1:
         selected.pop(user_id, None)
-        await message.answer(text, reply_markup=undo_kb(entry_ids))
+        await message.answer(text, reply_markup=undo_kb(entry_ids, effort=effort))
         await ask_next_exercise(message, user_id, "➡️ Какое упражнение делаем далее?")
         return
     auto = autorest(user_id)
     await message.answer(text + f"\nСледующий подход — просто цифры, например {hint}",
-                         reply_markup=undo_kb(entry_ids, None if auto else seconds))
+                         reply_markup=undo_kb(entry_ids, None if auto else seconds, effort=effort))
     if auto:
         await start_rest(message, user_id, seconds, label)
 
@@ -303,6 +317,7 @@ async def on_workout_type(cb: CallbackQuery):
     elif user_id in selected:
         await cb.message.answer(selected_text(user_id, selected[user_id], wid))
     else:
+        await ask_wellbeing(cb.message)
         await ask_next_exercise(cb.message, user_id, "🏋️ С какого упражнения начинаем?")
 
 
@@ -356,7 +371,7 @@ async def save_triset(message: Message, workout_id: int, rounds: int, reps: list
         ids.append(db.add_entry(workout_id, key, [SetRow(r) for _ in range(rounds)], "трисет"))
         lines.append(f"• {reports.ex_name(key)} — {rounds}×{r}")
     await after_record(message, message_user(message), f"✅ {ABS_TRISET['title']}, кругов: {rounds}\n" + "\n".join(lines),
-                       ids, REST_LIGHT, ABS_TRISET["title"], n_sets=rounds)
+                       ids, REST_LIGHT, ABS_TRISET["title"], n_sets=rounds, effort=False)
 
 
 # ---------- отчёты ----------
@@ -447,8 +462,10 @@ async def save_entry(message: Message, user_id: int, workout_id: int, key: str, 
     except ParseError as e:
         await message.answer(f"⚠️ {e}")
         return
-    entry_id = db.add_entry(workout_id, key, rows, raw)
-    saved = [dict(reps=r.reps, weight=r.weight, extra=r.extra) for r in rows]
+    bw = db.body_weight_on(user_id) if ex.bw_factor else None
+    body = round(bw * ex.bw_factor, 1) if bw else 0.0          # подтягивания, брусья: свой вес идёт в тоннаж
+    entry_id = db.add_entry(workout_id, key, rows, raw, body=body)
+    saved = [dict(reps=r.reps, weight=r.weight, extra=r.extra, body=body) for r in rows]
     t = reports.tonnage(saved)
     text = f"✅ {ex.name}: {reports.fmt_sets(saved)}"
     if t:
@@ -470,6 +487,15 @@ async def on_text(message: Message):
     low = text.lower().replace("ё", "е")
     if low.startswith("/"):
         await message.answer("Не знаю такую команду.\n\n" + HELP)
+        return
+
+    m = re.fullmatch(r"(болит|боль|побаливает|ноет|тянет)\s+(.+)", low)
+    if m:
+        await save_pain(message, user_id, m.group(2).strip()[:100])
+        return
+
+    if re.match(r"(замер|/measure)", low) or measures.looks_like_measures(low):
+        await handle_measures(message, user_id, low)
         return
 
     m = re.fullmatch(r"(сон|спал|спала|поспал)\s+(.+)", low)
@@ -802,6 +828,15 @@ async def water_reminders(bot: Bot):
     while True:
         await asyncio.sleep(30)
         now = datetime.now()
+        if now.day == 1 and now.hour == 10:   # 1-го числа — напоминание о замерах
+            for uid in db.reminder_users():
+                stamp = f"m {uid} {now:%Y-%m}"
+                if stamp not in sent:
+                    sent.add(stamp)
+                    try:
+                        await bot.send_message(uid, "📏 Новый месяц — время замеров!\n" + measures.HOWTO)
+                    except Exception:
+                        logging.exception("Не удалось отправить напоминание о замерах")
         if now.hour not in REMIND_HOURS:
             continue
         for uid in db.reminder_users():
@@ -967,6 +1002,101 @@ async def on_select_group(cb: CallbackQuery):
     kb.adjust(1)
     await cb.answer()
     await cb.message.answer(f"{GROUPS[g]}:", reply_markup=kb.as_markup())
+
+
+# ---------- тяжесть подхода, самочувствие, боль, замеры ----------
+
+def effort_tip(key: str, effort: int, row) -> str:
+    ex = BY_KEY[key]
+    if effort == 3:
+        return "Держи этот вес, пока он не станет «норм»."
+    if effort == 2:
+        return "Хорошо. Когда станет «легко» — прибавляй."
+    # легко
+    if ex.bodyweight:
+        return "💡 Легко — в следующий раз +1–2 повтора или отягощение +2,5 кг."
+    if key in ("curl_db", "lat_raise", "db_fly", "side_bends", "curl_kb", "calf_standing", "hammer", "db_row"):
+        return "💡 Легко — у гантелей/гири вес шагами: сначала +1–2 повтора, потом бери тяжелее."
+    return f"💡 Легко — в следующий раз можно {fmt_kg((row['weight'] or 0) + 2.5)} кг (+2,5 кг) или +1–2 повтора."
+
+
+@router.callback_query(F.data.startswith("eff:"))
+async def on_effort(cb: CallbackQuery):
+    _, entry_id, effort = cb.data.split(":")
+    entry_id, effort = int(entry_id), int(effort)
+    e = db.get_entry(entry_id)
+    if not e:
+        await cb.answer("Запись уже удалена")
+        return
+    db.set_effort(entry_id, effort)
+    rows = [r for r in db.workout_sets(e["workout_id"]) if r["entry_id"] == entry_id]
+    tip = effort_tip(e["exercise_key"], effort, rows[0]) if rows else ""
+    await cb.answer(reports.EFFORT[effort])
+    try:
+        await cb.message.edit_text(f"{cb.message.text}\nТяжесть: {reports.EFFORT[effort]}. {tip}",
+                                   reply_markup=undo_kb([entry_id]))
+    except Exception:
+        pass
+
+
+async def ask_wellbeing(message: Message):
+    kb = InlineKeyboardBuilder()
+    for v, t in ((1, "😫 1"), (2, "😕 2"), (3, "😐 3"), (4, "🙂 4"), (5, "😎 5")):
+        kb.button(text=t, callback_data=f"wb:{v}")
+    kb.button(text="🤕 Что-то болит", callback_data="wb:pain")
+    kb.adjust(5, 1)
+    await message.answer("Как самочувствие сегодня? (1 — плохо, 5 — отлично)", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("wb:"))
+async def on_wellbeing(cb: CallbackQuery):
+    v = cb.data.split(":")[1]
+    await cb.answer()
+    if v == "pain":
+        await cb.message.answer("Напиши, что болит, например: болит плечо · болит поясница · болит колено")
+        return
+    active = db.active_workout(cb.from_user.id)
+    if not active:
+        return
+    db.set_wellbeing(active["id"], int(v))
+    text = f"Самочувствие: {v}/5 записано."
+    if int(v) <= 2:
+        text += "\n⚠️ Сегодня работай легче: веса на 10–20% ниже, без рекордов. Если плохо — лучше отдохнуть."
+    try:
+        await cb.message.edit_text(text)
+    except Exception:
+        await cb.message.answer(text)
+
+
+async def save_pain(message: Message, user_id: int, what: str):
+    active = db.active_workout(user_id)
+    if active and active["day"] == date.today().isoformat():
+        db.add_pain(active["id"], what)
+    else:
+        prev = db.get_setting(user_id, f"pain:{date.today().isoformat()}")
+        db.set_setting(user_id, f"pain:{date.today().isoformat()}", f"{prev}; {what}" if prev else what)
+    await message.answer(f"🤕 Записал: болит {what}.\n"
+                         "Не делай упражнения через боль: убери или замени то, что её вызывает, снизь вес. "
+                         "Если боль острая или не проходит несколько дней — к врачу.")
+
+
+async def handle_measures(message: Message, user_id: int, low: str):
+    values = measures.parse_measures(low)
+    if not values:
+        await message.answer(measures.history_text(db, user_id))
+        return
+    before = {part: db.measure_history(user_id, part) for part in values}
+    for part, v in values.items():
+        db.add_measure(user_id, part, v)
+    lines = ["📏 Замеры записаны:"]
+    for part, v in values.items():
+        line = f"• {measures.PARTS[part]}: {fmt_kg(v)} см"
+        prev = [r for r in before[part] if r["day"] != date.today().isoformat()]
+        if prev:
+            d = v - prev[-1]["value"]
+            line += f" ({'+' if d >= 0 else '−'}{fmt_kg(abs(round(d, 1)))} с {reports.ddmmyyyy(prev[-1]['day'])})"
+        lines.append(line)
+    await message.answer("\n".join(lines))
 
 
 # ---------- сон и итог дня ----------

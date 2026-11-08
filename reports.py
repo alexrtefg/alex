@@ -18,8 +18,24 @@ def ex_name(key: str) -> str:
     return BY_KEY[key].name if key in BY_KEY else key
 
 
+EFFORT = {1: "😌 легко", 2: "💪 норм", 3: "🥵 тяжело"}
+
+
+def body(r) -> float:
+    """Вес тела, входящий в подход (подтягивания, брусья, гиперэкстензия); у старых записей 0."""
+    try:
+        return r["body"] or 0.0
+    except (KeyError, IndexError):
+        return 0.0
+
+
+def load(r) -> float:
+    """Сколько килограммов реально поднято за один повтор: снаряд + отягощение + вес тела."""
+    return r["weight"] + r["extra"] + body(r)
+
+
 def tonnage(rows) -> float:
-    return sum(r["reps"] * (r["weight"] + r["extra"]) for r in rows)
+    return sum(r["reps"] * load(r) for r in rows)
 
 
 def e1rm(weight: float, reps: int) -> float:
@@ -70,6 +86,10 @@ def workout_report(db: DB, workout_id: int, title: str = "📅 Трениров�
         return "Тренировка не найдена."
     rows = db.workout_sets(workout_id)
     head = f"{title} {ddmmyyyy(w['day'])}\n{TEMPLATES[w['wtype']]['title']}"
+    if "wellbeing" in w.keys() and w["wellbeing"]:
+        head += f"\nСамочувствие: {w['wellbeing']}/5"
+    if "pain" in w.keys() and w["pain"]:
+        head += f"\n🤕 Болит: {w['pain']}"
     if not rows:
         return head + "\n\nПока нет записей."
     lines = [head, ""]
@@ -78,6 +98,9 @@ def workout_report(db: DB, workout_id: int, title: str = "📅 Трениров�
         line = f"{i}. {ex_name(key)} — {fmt_sets(ex_rows)}"
         if t:
             line += f" (тоннаж {fmt_kg(t)} кг)"
+        efforts = [r["effort"] for r in ex_rows if "effort" in r.keys() and r["effort"]]
+        if efforts:
+            line += f" {EFFORT[efforts[-1]].split()[0]}"
         lines.append(line)
     n_ex = len(group_by_exercise(rows))
     reps = sum(r["reps"] for r in rows)
@@ -138,10 +161,10 @@ def period_report(db: DB, user_id: int, kind: str, today: date | None = None) ->
     lines = [f"📊 {title}", ""]
     na = sum(1 for w in workouts if w["wtype"] == "A")
     lines.append(f"Тренировок: {len(workouts)} (А: {na}, Б: {len(workouts) - na})")
-    if len(workouts) > 1:
-        days = [date.fromisoformat(w["day"]) for w in workouts]
+    days = sorted({date.fromisoformat(w["day"]) for w in workouts})   # несколько записей в один день = один день
+    if len(days) > 1:
         gaps = [(b - a).days for a, b in zip(days, days[1:])]
-        lines.append(f"Средний интервал: {sum(gaps) / len(gaps):.1f} дн.")
+        lines.append(f"Средний интервал: {fmt_kg(round(sum(gaps) / len(gaps), 1))} дн.")
     lines.append(f"Подходов: {len(sets_only)}, тоннаж: {fmt_kg(total)} кг")
 
     p_start, p_end = previous_bounds(kind, start)
@@ -154,7 +177,7 @@ def period_report(db: DB, user_id: int, kind: str, today: date | None = None) ->
     by_group: dict[str, float] = {}
     for r in sets_only:
         g = BY_KEY[r["exercise_key"]].group if r["exercise_key"] in BY_KEY else "other"
-        by_group[g] = by_group.get(g, 0) + r["reps"] * (r["weight"] + r["extra"])
+        by_group[g] = by_group.get(g, 0) + r["reps"] * load(r)
     if total:
         lines.append("")
         lines.append("По группам (доля тоннажа):")

@@ -98,6 +98,21 @@ def day_summary(db: DB, user_id: int, day: date | None = None, now: datetime | N
         else:
             lines.append("🏋️ Тренировок пока нет.")
 
+    # --- самочувствие и боль ---
+    wb = next((w["wellbeing"] for w in reversed(ws) if w["wellbeing"]), None)
+    pains = [w["pain"] for w in ws if w["pain"]]
+    extra_pain = db.get_setting(user_id, f"pain:{day.isoformat()}")
+    if extra_pain:
+        pains.append(extra_pain)
+    if wb:
+        lines.append(f"🙂 Самочувствие {wb}/5")
+        if wb <= 2:
+            low.append("самочувствие")
+            tips.append("🙂 Самочувствие плохое — следующую тренировку начни легче, проверь сон и питание.")
+    if pains:
+        lines.append("🤕 Болит: " + "; ".join(pains))
+        tips.append("🤕 Не делай упражнения через боль: замени их или снизь вес. Не проходит несколько дней — к врачу.")
+
     # --- питание ---
     if t:
         lines.append(f"🍽 Калории {tot['kcal']:.0f}/{t['kcal']:.0f} ({_pct(tot['kcal'], t['kcal']):.0f}%) · "
@@ -230,6 +245,11 @@ def week_summary(db: DB, user_id: int, end: date | None = None) -> str:
             lines.append(f"🍽 В среднем: {avg['kcal']:.0f} ккал · белок {avg['protein']:.0f} г")
     else:
         lines.append("🍽 Питание за неделю не записано.")
+
+    pains = db.pains_between(user_id, start, end)
+    if pains:
+        lines.append("🤕 Жалобы: " + "; ".join(f"{r['day'][8:10]}.{r['day'][5:7]} — {r['pain']}" for r in pains))
+        tips.append("🤕 Были боли — посмотри, после каких упражнений, и замени их или снизь вес.")
 
     sl = db.sleep_between(user_id, start, end)
     if sl:
